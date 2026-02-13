@@ -6,389 +6,217 @@ from datetime import date
 import numpy as np
 import pandas as pd
 import streamlit as st
+import altair as alt
 
 st.set_page_config(page_title="BMCE Capital — Dashboard S&R", layout="wide")
 
-# ==========================================================
-# STYLE — FORCE LIGHT THEME:
-# - TOUT BLANC (APP / SIDEBAR / CARDS / TABLES / CHARTS)
-# - TEXTE NOIR PARTOUT
-# - DELTA KPI VERT/ROUGE
-# - BOUTONS "agrandir / menu" (toolbar charts & tables) EN BLANC
-# - ✅ MENUS DÉROULANTS (selectbox/multiselect) EN BLANC + TEXTE NOIR
-# ==========================================================
-BLACK = "#000000"
-WHITE = "#FFFFFF"
-BORDER = "#E5E7EB"
+# ──────────────────────────────────────────────
+# DESIGN TOKENS
+# ──────────────────────────────────────────────
+PRIMARY = "#0F172A"
+SECONDARY = "#475569"
+MUTED = "#94A3B8"
+BG = "#FFFFFF"
+SURFACE = "#F8FAFC"
+BORDER = "#E2E8F0"
+ACCENT = "#2563EB"
+GREEN = "#16A34A"
+RED = "#DC2626"
+CHART_GRID = "#F1F5F9"
+PALETTE = [ACCENT, "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#EC4899"]
 
-st.markdown(
-    f"""
-    <style>
-      :root {{
-        --bmce-white: {WHITE};
-        --bmce-black: {BLACK};
-        --bmce-border: {BORDER};
-      }}
+# ──────────────────────────────────────────────
+# CSS  (%-format to avoid brace conflicts)
+# ──────────────────────────────────────────────
+_T = dict(P=PRIMARY, S=SECONDARY, M=MUTED, B=BG, SF=SURFACE,
+          BD=BORDER, AC=ACCENT, GR=GREEN, RD=RED)
 
-      /* 1) TEXTE NOIR PARTOUT */
-      html, body, .stApp, [class*="css"], * {{
-        color: var(--bmce-black) !important;
-        -webkit-text-fill-color: var(--bmce-black) !important;
-        text-shadow: none !important;
-        opacity: 1 !important;
-      }}
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,500;0,9..40,700;1,9..40,400&display=swap');
 
-      /* 2) BACKGROUND BLANC PARTOUT */
-      html, body, .stApp {{
-        background: var(--bmce-white) !important;
-      }}
-      .main, .block-container,
-      div[data-testid="stAppViewContainer"],
-      div[data-testid="stAppViewContainer"] > .main,
-      div[data-testid="stMain"],
-      header[data-testid="stHeader"] {{
-        background: var(--bmce-white) !important;
-      }}
+html,body,.stApp,[class*="css"]{font-family:'DM Sans',-apple-system,BlinkMacSystemFont,sans-serif!important;color:%(P)s!important;-webkit-text-fill-color:%(P)s!important}
+html,body,.stApp,.main,.block-container,div[data-testid="stAppViewContainer"],div[data-testid="stAppViewContainer"]>.main,div[data-testid="stMain"],header[data-testid="stHeader"]{background:%(B)s!important}
 
-      section[data-testid="stSidebar"] {{
-        background: var(--bmce-white) !important;
-        border-right: 1px solid var(--bmce-border) !important;
-      }}
+section[data-testid="stSidebar"]{background:%(SF)s!important;border-right:1px solid %(BD)s!important}
+section[data-testid="stSidebar"] *{color:%(P)s!important;-webkit-text-fill-color:%(P)s!important}
 
-      h1, h2, h3, h4, h5, h6 {{
-        color: var(--bmce-black) !important;
-        -webkit-text-fill-color: var(--bmce-black) !important;
-        font-weight: 900 !important;
-        letter-spacing: -0.02em;
-      }}
+h1{font-size:1.75rem!important;font-weight:700!important;color:%(P)s!important}
+h2{font-size:1.35rem!important;font-weight:700!important;color:%(P)s!important}
+h3{font-size:1.10rem!important;font-weight:600!important;color:%(P)s!important}
+p,span,label,.stMarkdown,.stMarkdown *{color:%(P)s!important;-webkit-text-fill-color:%(P)s!important}
 
-      .stMarkdown, .stMarkdown * {{
-        color: var(--bmce-black) !important;
-        -webkit-text-fill-color: var(--bmce-black) !important;
-      }}
+div[data-baseweb="select"]>div{border-radius:10px!important;border:1px solid %(BD)s!important;background:%(B)s!important}
+input,textarea{border-radius:10px!important;border:1px solid %(BD)s!important;background:%(B)s!important;color:%(P)s!important}
+div[data-baseweb="popover"],div[data-baseweb="menu"],ul[role="listbox"]{background-color:%(B)s!important;border:1px solid %(BD)s!important;border-radius:10px!important}
+div[data-baseweb="menu"] *,li[role="option"]{background-color:%(B)s!important;color:%(P)s!important;-webkit-text-fill-color:%(P)s!important}
+div[data-baseweb="menu"] [role="option"]:hover,li[role="option"]:hover{background-color:%(SF)s!important}
 
-      /* =========================
-         INPUTS
-      ========================= */
-      div[data-baseweb="select"] > div {{
-        border-radius: 12px !important;
-        border: 1px solid var(--bmce-border) !important;
-        background: var(--bmce-white) !important;
-      }}
-      input, textarea {{
-        border-radius: 12px !important;
-        border: 1px solid var(--bmce-border) !important;
-        background: var(--bmce-white) !important;
-        color: var(--bmce-black) !important;
-        -webkit-text-fill-color: var(--bmce-black) !important;
-      }}
+.stButton>button{background:%(B)s!important;color:%(P)s!important;border:1px solid %(BD)s!important;border-radius:10px!important;font-weight:600!important}
+.stButton>button:hover{background:%(SF)s!important}
 
-      /* ✅ MENUS DÉROULANTS (liste ouverte) — BLANC + TEXTE NOIR */
-      div[data-baseweb="popover"] {{
-        background-color: #FFFFFF !important;
-      }}
-      div[data-baseweb="menu"] {{
-        background-color: #FFFFFF !important;
-      }}
-      div[data-baseweb="menu"] * {{
-        background-color: #FFFFFF !important;
-        color: #000000 !important;
-        -webkit-text-fill-color: #000000 !important;
-      }}
-      div[data-baseweb="menu"] [role="option"]:hover,
-      div[data-baseweb="menu"] [role="option"]:hover * {{
-        background-color: #F8FAFC !important;
-        color: #000000 !important;
-        -webkit-text-fill-color: #000000 !important;
-      }}
-      /* fallback selon versions */
-      ul[role="listbox"] {{
-        background-color: #FFFFFF !important;
-      }}
-      li[role="option"] {{
-        background-color: #FFFFFF !important;
-        color: #000000 !important;
-        -webkit-text-fill-color: #000000 !important;
-      }}
-      li[role="option"]:hover {{
-        background-color: #F8FAFC !important;
-      }}
+div[data-testid="metric-container"]{background:%(B)s!important;border:1px solid %(BD)s!important;padding:16px!important;border-radius:12px!important;box-shadow:0 1px 3px rgba(15,23,42,.04)!important}
+div[data-testid="metric-container"] *{color:%(P)s!important;-webkit-text-fill-color:%(P)s!important;font-weight:600!important;opacity:1!important}
+div[data-testid="metric-container"] [data-testid="stMetricDelta"] *{-webkit-text-fill-color:inherit!important}
+div[data-testid="metric-container"] [data-direction="up"] *{color:%(GR)s!important;-webkit-text-fill-color:%(GR)s!important}
+div[data-testid="metric-container"] [data-direction="down"] *{color:%(RD)s!important;-webkit-text-fill-color:%(RD)s!important}
 
-      /* Buttons */
-      .stButton>button {{
-        background: var(--bmce-white) !important;
-        color: var(--bmce-black) !important;
-        -webkit-text-fill-color: var(--bmce-black) !important;
-        border: 1px solid var(--bmce-border) !important;
-        border-radius: 12px !important;
-        padding: 0.62rem 1.05rem !important;
-        font-weight: 900 !important;
-      }}
-      .stButton>button:hover {{
-        background: #F8FAFC !important;
-      }}
+details{background:%(B)s!important;border:1px solid %(BD)s!important;border-radius:12px!important}
+details summary{color:%(P)s!important;font-weight:600!important}
 
-      /* Expanders */
-      details {{
-        background: var(--bmce-white) !important;
-        border: 1px solid var(--bmce-border) !important;
-        border-radius: 14px !important;
-        padding: 6px 10px !important;
-      }}
-      details summary {{
-        color: var(--bmce-black) !important;
-        -webkit-text-fill-color: var(--bmce-black) !important;
-        font-weight: 900 !important;
-      }}
+.stTabs [data-baseweb="tab-list"]{border-bottom:1px solid %(BD)s!important}
+.stTabs [data-baseweb="tab"]{background:transparent!important;color:%(M)s!important;-webkit-text-fill-color:%(M)s!important;font-weight:600!important;border-bottom:2px solid transparent!important}
+.stTabs [aria-selected="true"]{color:%(P)s!important;-webkit-text-fill-color:%(P)s!important;border-bottom:2px solid %(AC)s!important;font-weight:700!important}
 
-      /* Metrics */
-      div[data-testid="metric-container"] {{
-        background: var(--bmce-white) !important;
-        border: 1px solid var(--bmce-border) !important;
-        padding: 14px 14px 10px 14px !important;
-        border-radius: 16px !important;
-        box-shadow: 0 2px 10px rgba(15, 23, 42, 0.06) !important;
-      }}
-      div[data-testid="metric-container"] * {{
-        color: var(--bmce-black) !important;
-        -webkit-text-fill-color: var(--bmce-black) !important;
-        font-weight: 900 !important;
-        opacity: 1 !important;
-      }}
+div[data-testid="stVegaLiteChart"]{background:%(B)s!important;border:1px solid %(BD)s!important;border-radius:12px!important;padding:12px!important}
+div[data-testid="stVegaLiteChart"] canvas,div[data-testid="stVegaLiteChart"] svg{background:%(B)s!important}
 
-      /* Delta KPI */
-      div[data-testid="metric-container"] [data-testid="stMetricDelta"] * {{
-        -webkit-text-fill-color: inherit !important;
-      }}
-      div[data-testid="metric-container"] [data-direction="up"] * {{
-        color: #15803D !important;
-        -webkit-text-fill-color: #15803D !important;
-        font-weight: 900 !important;
-      }}
-      div[data-testid="metric-container"] [data-direction="down"] * {{
-        color: #B91C1C !important;
-        -webkit-text-fill-color: #B91C1C !important;
-        font-weight: 900 !important;
-      }}
+/* ═══ VEGA TOOLTIP — force white ═══ */
+#vg-tooltip-element,
+#vg-tooltip-element.vg-tooltip,
+.vg-tooltip,
+div.vg-tooltip{
+  background-color:%(B)s!important;
+  color:%(P)s!important;
+  border:1px solid %(BD)s!important;
+  border-radius:8px!important;
+  padding:8px 12px!important;
+  font-family:'DM Sans',sans-serif!important;
+  font-size:0.82rem!important;
+  box-shadow:0 4px 12px rgba(15,23,42,.10)!important;
+}
+#vg-tooltip-element *,.vg-tooltip *,div.vg-tooltip *{
+  color:%(P)s!important;-webkit-text-fill-color:%(P)s!important;
+  background:transparent!important;
+}
+#vg-tooltip-element td.key,.vg-tooltip td.key{color:%(M)s!important;-webkit-text-fill-color:%(M)s!important;font-weight:500!important}
+#vg-tooltip-element td.value,.vg-tooltip td.value{color:%(P)s!important;-webkit-text-fill-color:%(P)s!important;font-weight:700!important}
+#vg-tooltip-element table,.vg-tooltip table{border-collapse:collapse!important}
+#vg-tooltip-element td,.vg-tooltip td{padding:2px 6px!important;border:none!important}
 
-      hr {{
-        border: none !important;
-        border-top: 1px solid var(--bmce-border) !important;
-        margin: 1rem 0 !important;
-      }}
+/* ═══ TOOLBAR — keep icons nice ═══ */
+div[data-testid="stElementToolbar"]{background:transparent!important}
+div[data-testid="stElementToolbar"] button,
+div[data-testid="stElementToolbar"] [role="button"]{
+  background:%(B)s!important;color:%(P)s!important;-webkit-text-fill-color:%(P)s!important;
+  border:1px solid %(BD)s!important;border-radius:10px!important;
+  width:34px!important;height:34px!important;
+  display:inline-flex!important;align-items:center!important;justify-content:center!important;
+  cursor:pointer!important;
+  box-shadow:0 1px 2px rgba(15,23,42,.06)!important;
+}
+div[data-testid="stElementToolbar"] button:hover{
+  background:%(SF)s!important;
+  box-shadow:0 4px 12px rgba(15,23,42,.10)!important;
+  transform:translateY(-1px);
+}
+div[data-testid="stElementToolbar"] svg,div[data-testid="stElementToolbar"] path{fill:%(P)s!important;color:%(P)s!important}
 
-      /* File uploader */
-      section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {{
-        background: var(--bmce-white) !important;
-        border: 1px solid var(--bmce-border) !important;
-        border-radius: 14px !important;
-      }}
-      section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] * {{
-        background: transparent !important;
-        color: var(--bmce-black) !important;
-        -webkit-text-fill-color: var(--bmce-black) !important;
-      }}
-      section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] button {{
-        background: var(--bmce-white) !important;
-        border: 1px solid var(--bmce-border) !important;
-        border-radius: 10px !important;
-        color: var(--bmce-black) !important;
-        -webkit-text-fill-color: var(--bmce-black) !important;
-        font-weight: 900 !important;
-      }}
-      section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] button:hover {{
-        background: #F8FAFC !important;
-      }}
+button[kind="icon"],button[kind="icon"] *{background:%(B)s!important;color:%(P)s!important;fill:%(P)s!important}
 
-      /* DATAFRAME (AG GRID) — FORCE BLANC */
-      div[data-testid="stDataFrame"] {{
-        background: var(--bmce-white) !important;
-        border: 1px solid var(--bmce-border) !important;
-        border-radius: 14px !important;
-        overflow: hidden !important;
-      }}
-      div[data-testid="stDataFrame"] .ag-theme-streamlit,
-      div[data-testid="stDataFrame"] .ag-theme-alpine,
-      div[data-testid="stDataFrame"] .ag-theme-balham {{
-        --ag-background-color: #FFFFFF !important;
-        --ag-foreground-color: #000000 !important;
-        --ag-header-background-color: #FFFFFF !important;
-        --ag-header-foreground-color: #000000 !important;
-        --ag-row-background-color: #FFFFFF !important;
-        --ag-odd-row-background-color: #FFFFFF !important;
-        --ag-border-color: #E5E7EB !important;
-        --ag-secondary-border-color: #E5E7EB !important;
-        --ag-row-hover-color: #FFFFFF !important;
-        --ag-selected-row-background-color: #FFFFFF !important;
-      }}
-      div[data-testid="stDataFrame"] .ag-root-wrapper,
-      div[data-testid="stDataFrame"] .ag-root,
-      div[data-testid="stDataFrame"] .ag-body,
-      div[data-testid="stDataFrame"] .ag-body-viewport,
-      div[data-testid="stDataFrame"] .ag-center-cols-viewport,
-      div[data-testid="stDataFrame"] .ag-header,
-      div[data-testid="stDataFrame"] .ag-header-viewport,
-      div[data-testid="stDataFrame"] .ag-header-container,
-      div[data-testid="stDataFrame"] .ag-cell,
-      div[data-testid="stDataFrame"] .ag-row,
-      div[data-testid="stDataFrame"] .ag-row .ag-cell {{
-        background: #FFFFFF !important;
-        color: #000000 !important;
-        -webkit-text-fill-color: #000000 !important;
-      }}
-      div[data-testid="stDataFrame"] .ag-row-hover,
-      div[data-testid="stDataFrame"] .ag-row-hover .ag-cell,
-      div[data-testid="stDataFrame"] .ag-row-selected,
-      div[data-testid="stDataFrame"] .ag-row-selected .ag-cell {{
-        background: #FFFFFF !important;
-      }}
-      div[data-testid="stDataFrame"] .ag-header-cell,
-      div[data-testid="stDataFrame"] .ag-header-cell-label {{
-        background: #FFFFFF !important;
-        border-bottom: 1px solid #E5E7EB !important;
-        color: #000000 !important;
-        -webkit-text-fill-color: #000000 !important;
-        font-weight: 900 !important;
-      }}
+section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"]{background:%(B)s!important;border:1.5px dashed %(BD)s!important;border-radius:12px!important}
+section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] *{background:transparent!important;color:%(P)s!important}
 
-      /* CHARTS (Vega) — FORCE BLANC */
-      div[data-testid="stVegaLiteChart"] {{
-        background: #FFFFFF !important;
-        border: 1px solid #E5E7EB !important;
-        border-radius: 14px !important;
-        padding: 8px !important;
-      }}
-      div[data-testid="stVegaLiteChart"] canvas,
-      div[data-testid="stVegaLiteChart"] svg {{
-        background: #FFFFFF !important;
-      }}
+hr{border:none!important;border-top:1px solid %(BD)s!important;margin:1.25rem 0!important}
+div[data-testid="stSlider"] *{color:%(P)s!important;-webkit-text-fill-color:%(P)s!important}
+</style>
+""" % _T, unsafe_allow_html=True)
 
-      /* TOOLBAR buttons (agrandir/menu) — BLANC */
-      div[data-testid="stElementToolbar"] {{
-        background: transparent !important;
-      }}
-      div[data-testid="stElementToolbar"] button,
-      div[data-testid="stElementToolbar"] [role="button"] {{
-        background: #FFFFFF !important;
-        color: #000000 !important;
-        -webkit-text-fill-color: #000000 !important;
-        border: 1px solid #E5E7EB !important;
-        border-radius: 10px !important;
-      }}
-      div[data-testid="stElementToolbar"] button:hover,
-      div[data-testid="stElementToolbar"] [role="button"]:hover {{
-        background: #F8FAFC !important;
-      }}
-      div[data-testid="stElementToolbar"] svg,
-      div[data-testid="stElementToolbar"] path {{
-        fill: #000000 !important;
-        color: #000000 !important;
-      }}
-      button[kind="icon"],
-      button[kind="icon"] * {{
-        background: #FFFFFF !important;
-        color: #000000 !important;
-        fill: #000000 !important;
-        -webkit-text-fill-color: #000000 !important;
-        border-color: #E5E7EB !important;
-      }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# ──────────────────────────────────────────────
+# ALTAIR THEME
+# ──────────────────────────────────────────────
+def _bmce_theme():
+    return {
+        "config": {
+            "background": BG,
+            "view": {"stroke": "transparent"},
+            "axis": {
+                "domainColor": BORDER, "gridColor": CHART_GRID,
+                "tickColor": BORDER, "labelColor": SECONDARY,
+                "titleColor": PRIMARY, "labelFont": "DM Sans",
+                "titleFont": "DM Sans", "labelFontSize": 11,
+                "titleFontSize": 12, "titleFontWeight": 600,
+            },
+            "legend": {"labelColor": SECONDARY, "titleColor": PRIMARY,
+                       "labelFont": "DM Sans", "titleFont": "DM Sans"},
+            "title": {"color": PRIMARY, "font": "DM Sans", "fontWeight": 700, "fontSize": 14},
+            "line": {"strokeWidth": 2.5},
+            "range": {"category": PALETTE},
+        }
+    }
 
-# ==========================================================
-# Logo paths
-# ==========================================================
-LOGO_CANDIDATES = [
+alt.themes.register("bmce", _bmce_theme)
+alt.themes.enable("bmce")
+
+# ──────────────────────────────────────────────
+# LOGO
+# ──────────────────────────────────────────────
+_LOGO_PATHS = [
     Path("/Users/mac/Desktop/bmce_capital_logo.jpeg"),
     Path("bmce_capital_logo.jpeg"),
     Path("bmce_capital_logo.jpg"),
     Path("bmce_capital_logo.png"),
 ]
 
-
-def resolve_logo_path() -> Path | None:
-    for p in LOGO_CANDIDATES:
+def _find_logo():
+    for p in _LOGO_PATHS:
         try:
             if p.exists():
                 return p
         except Exception:
-            continue
+            pass
     return None
 
+logo_path = _find_logo()
 
-logo_path = resolve_logo_path()
+# ──────────────────────────────────────────────
+# HELPERS
+# ──────────────────────────────────────────────
+_RE_DATE = re.compile(r"(\d{1,2})\s*[\/\-\.]\s*(\d{1,2})")
 
-# ==========================================================
-# Helpers
-# ==========================================================
-DATE_IN_TEXT = re.compile(r"(\d{1,2})\s*[\/\-\.]\s*(\d{1,2})")
-
-
-def norm_ddmm(x: str) -> str | None:
-    m = DATE_IN_TEXT.search(str(x) if x is not None else "")
+def norm_ddmm(x):
+    m = _RE_DATE.search(str(x) if x is not None else "")
     if not m:
         return None
     dd, mm = int(m.group(1)), int(m.group(2))
-    if 1 <= dd <= 31 and 1 <= mm <= 12:
-        return f"{dd:02d}/{mm:02d}"
-    return None
+    return f"{dd:02d}/{mm:02d}" if 1 <= dd <= 31 and 1 <= mm <= 12 else None
 
-
-def mmdd_sort_key(ddmm: str):
+def mmdd_sort(ddmm):
     dd, mm = ddmm.split("/")
     return (int(mm), int(dd))
 
-
-def ddmm_to_dt(ddmm: str, year: int | None = None) -> pd.Timestamp:
-    year = year if year is not None else date.today().year
+def ddmm_to_dt(ddmm, year=None):
+    year = year or date.today().year
     dd, mm = ddmm.split("/")
     return pd.Timestamp(year=year, month=int(mm), day=int(dd))
-
 
 def to_float(x):
     if pd.isna(x):
         return np.nan
     if isinstance(x, (int, float, np.number)):
         return float(x)
-
     s = str(x).strip()
     if s.lower() in {"", "-", "—", "n/a", "na", "nan", "null", "none"}:
         return np.nan
-
     s = s.replace("\u00A0", " ").replace("\u202F", " ").replace(" ", "")
-    is_pct = s.endswith("%")
-    if is_pct:
+    pct = s.endswith("%")
+    if pct:
         s = s[:-1]
     s = s.replace(",", ".")
-
     try:
         v = float(s)
     except Exception:
         return np.nan
+    return v / 100.0 if pct else v
 
-    return v / 100.0 if is_pct else v
+def fmt_money(x):
+    return "—" if pd.isna(x) else f"{x:,.0f}".replace(",", " ")
 
-
-def format_money(x):
-    if pd.isna(x):
-        return "—"
-    return f"{x:,.0f}".replace(",", " ")
-
-
-def format_pct(x):
-    if pd.isna(x):
-        return "—"
-    return f"{100 * x:.2f}%"
-
-
-def is_total_like(s):
+def is_total(s):
     t = str(s).strip().lower()
     return ("total" in t and ("gén" in t or "gen" in t)) or t == "total"
 
-
-def make_unique_cols(cols):
+def unique_cols(cols):
     seen = {}
     out = []
     for c in cols:
@@ -401,8 +229,7 @@ def make_unique_cols(cols):
             out.append(f"{c}__{seen[c]}")
     return out
 
-
-def find_col_like(cols, patterns):
+def find_col(cols, patterns):
     for c in list(cols):
         lc = str(c).strip().lower()
         for p in patterns:
@@ -410,35 +237,29 @@ def find_col_like(cols, patterns):
                 return c
     return None
 
-
-# ==========================================================
-# Robust reader for Recap sheet
-# ==========================================================
-def read_recap_sheet_bytes(xlsx_bytes: bytes, sheet_name: str) -> pd.DataFrame:
+# ──────────────────────────────────────────────
+# EXCEL READER
+# ──────────────────────────────────────────────
+def read_recap(xlsx_bytes, sheet_name):
     raw = pd.read_excel(io.BytesIO(xlsx_bytes), sheet_name=sheet_name, header=None, engine="openpyxl")
     if raw.empty or raw.shape[0] < 2:
         return raw
-
-    header_row = raw.iloc[0].tolist()
-    cols = make_unique_cols(header_row)
-
+    hdr = raw.iloc[0].tolist()
+    cols = unique_cols(hdr)
     df = raw.iloc[1:].copy()
     df.columns = cols
-
-    first_col = df.columns[0]
+    first = df.columns[0]
     inject = {c: np.nan for c in df.columns}
-    inject[first_col] = str(header_row[0]).strip()
+    inject[first] = str(hdr[0]).strip() if hdr and hdr[0] is not None else ""
     df = pd.concat([pd.DataFrame([inject]), df], ignore_index=True)
-
     return df.dropna(how="all").reset_index(drop=True)
 
-
-# ==========================================================
-# Parser (enriched)
-# ==========================================================
-def parse_recap_sr(df: pd.DataFrame) -> pd.DataFrame:
+# ──────────────────────────────────────────────
+# PARSER (KEEP YTD, REMOVE DEC & PART)
+# ──────────────────────────────────────────────
+def parse_recap_sr(df):
     df = df.copy()
-    df.columns = make_unique_cols(df.columns)
+    df.columns = unique_cols(df.columns)
     df = df.reset_index(drop=True)
 
     date_cols = [c for c in df.columns if norm_ddmm(c)]
@@ -449,45 +270,41 @@ def parse_recap_sr(df: pd.DataFrame) -> pd.DataFrame:
             ytd_col = c
             break
 
-    dec_col = find_col_like(df.columns, ["decembre"])
-    part_col = find_col_like(df.columns, ["part s&r", "part sr", "part"])
+    # REMOVE DEC + PART: we do NOT look for them anymore
+    non_date = [c for c in df.columns if c not in date_cols and c != ytd_col]
 
-    non_date_cols = [c for c in df.columns if c not in date_cols and c != ytd_col]
-    best_col, best_score = None, -1e9
-    for c in non_date_cols:
+    best, bsc = None, -1e9
+    for c in non_date:
         s = df[c].astype(str).fillna("")
         txt = s.str.strip().str.lower()
-        non_empty = (txt != "") & (txt != "nan") & (txt != "none")
-        num_like = s.apply(lambda v: pd.notna(to_float(v)))
-        score = non_empty.mean() - 0.6 * num_like.mean()
-        if score > best_score:
-            best_score, best_col = score, c
-    sg_col = best_col if (best_col in df.columns) else df.columns[0]
+        ne = (txt != "") & (txt != "nan") & (txt != "none")
+        num = s.apply(lambda v: pd.notna(to_float(v)))
+        sc = ne.mean() - 0.6 * num.mean()
+        if sc > bsc:
+            bsc, best = sc, c
+    sg_col = best if best in df.columns else df.columns[0]
 
-    def row_text(row: pd.Series) -> str:
-        parts = []
-        for v in row.values:
-            if pd.isna(v):
-                continue
-            t = str(v).strip()
-            if t and t.lower() not in {"nan", "none"}:
-                parts.append(t)
-        return " ".join(parts).upper()
+    def row_txt(row):
+        return " ".join(
+            str(v).strip()
+            for v in row.values
+            if pd.notna(v) and str(v).strip().lower() not in {"nan", "none", ""}
+        ).upper()
 
     rows = []
     bloc = None
 
     for i in range(len(df)):
         row = df.iloc[i]
-        trow = row_text(row)
+        t = row_txt(row)
 
-        if "OPCVM" in trow and "ACTION" in trow:
+        if "OPCVM" in t and "ACTION" in t:
             bloc = "ACTIONS"
             continue
-        if "OPCVM" in trow and "DIVERS" in trow:
+        if "OPCVM" in t and "DIVERS" in t:
             bloc = "DIVERSIFIES"
             continue
-        if "OPCVM" in trow and ("OMLT" in trow or "MON" in trow or "OBLIG" in trow):
+        if "OPCVM" in t and ("OMLT" in t or "MON" in t or "OBLIG" in t):
             bloc = "OMLT"
             continue
         if bloc is None:
@@ -499,103 +316,181 @@ def parse_recap_sr(df: pd.DataFrame) -> pd.DataFrame:
         sg = str(sg).strip()
         if not sg or sg.lower() in {"nan", "none"}:
             continue
-        if is_total_like(sg):
+        if is_total(sg):
             continue
 
         has_num = any(pd.notna(to_float(row.get(c))) for c in date_cols)
-        if not has_num and ytd_col:
+        if (not has_num) and ytd_col:
             has_num = pd.notna(to_float(row.get(ytd_col)))
-        if not has_num and dec_col:
-            has_num = pd.notna(to_float(row.get(dec_col)))
         if not has_num:
             continue
 
-        dec_val = to_float(row.get(dec_col)) if dec_col else np.nan
-        ytd_val = to_float(row.get(ytd_col)) if ytd_col else np.nan
-        part_val = to_float(row.get(part_col)) if part_col else np.nan
+        y = to_float(row.get(ytd_col)) if ytd_col else np.nan
 
         for c in date_cols:
-            ddmm = norm_ddmm(c)
-            rows.append(
-                {
-                    "Bloc": bloc,
-                    "SG": sg,
-                    "Date": ddmm,
-                    "SR": to_float(row.get(c)),
-                    "DEC": dec_val,
-                    "YTD_row": ytd_val,
-                    "PART_row": part_val,
-                }
-            )
+            rows.append({
+                "Bloc": bloc,
+                "SG": sg,
+                "Date": norm_ddmm(c),
+                "SR": to_float(row.get(c)),
+                "YTD_row": y,
+            })
 
     tidy = pd.DataFrame(rows)
     if tidy.empty:
         return tidy
-
-    tidy["k"] = tidy["Date"].apply(mmdd_sort_key)
+    tidy["k"] = tidy["Date"].apply(mmdd_sort)
     tidy = tidy.sort_values(["k", "Bloc", "SG"]).drop(columns=["k"])
     return tidy
 
+# ──────────────────────────────────────────────
+# ALTAIR LINE CHART
+# ──────────────────────────────────────────────
+def line_chart(data, x, y, color=None, title="", h=340):
+    base = alt.Chart(data).mark_line(strokeWidth=2.5, point=alt.OverlayMarkDef(filled=True, size=40))
+    enc = {"x": alt.X(f"{x}:T", title="Date"), "y": alt.Y(f"{y}:Q", title="S&R")}
+    tips = [
+        alt.Tooltip(f"{x}:T", title="Date", format="%d/%m/%Y"),
+        alt.Tooltip(f"{y}:Q", title="S&R", format=",.0f"),
+    ]
+    if color:
+        enc["color"] = alt.Color(f"{color}:N", title=None, scale=alt.Scale(range=PALETTE))
+        tips.append(alt.Tooltip(f"{color}:N", title="Bloc"))
+    enc["tooltip"] = tips
+    return (
+        base.encode(**enc)
+        .properties(title=title, height=h, background=BG)
+        .configure_view(strokeWidth=0)
+        .configure_axis(
+            grid=True, gridColor=CHART_GRID,
+            domainColor=BORDER, tickColor=BORDER,
+            labelColor=SECONDARY, titleColor=PRIMARY,
+        )
+        .configure_title(color=PRIMARY, fontSize=14, fontWeight=700)
+    )
 
-# ==========================================================
-# Header
-# ==========================================================
+# ──────────────────────────────────────────────
+# HTML TABLE (NO DEC, NO PART, NO WOW)
+# ──────────────────────────────────────────────
+_COL_LABELS = {
+    "Bloc": "BLOC",
+    "SG": "SOCIÉTÉ DE GESTION",
+    "S&R": "S&R",
+    "YTD": "YTD",
+}
+_RIGHT = {"S&R", "YTD"}
+
+def _fmt_cell(col, val):
+    if col in _RIGHT:
+        return fmt_money(val) if pd.notna(val) else "—"
+    return "—" if pd.isna(val) else str(val)
+
+def _cell_color(col, val):
+    if col == "S&R" and pd.notna(val):
+        return GREEN if val > 0 else RED if val < 0 else PRIMARY
+    return PRIMARY
+
+def html_table(df, columns, max_h=520):
+    hdr = ""
+    for c in columns:
+        al = "right" if c in _RIGHT else "left"
+        lab = _COL_LABELS.get(c, c)
+        hdr += (
+            f'<th style="text-align:{al};padding:11px 16px;font-weight:600;font-size:0.72rem;color:{MUTED};'
+            f'letter-spacing:0.06em;text-transform:uppercase;border-bottom:2px solid {BORDER};'
+            f'background:{SURFACE};position:sticky;top:0;z-index:1;">{lab}</th>'
+        )
+
+    body = ""
+    for i in range(len(df)):
+        r = df.iloc[i]
+        row_bg = BG if i % 2 == 0 else SURFACE
+        cells = ""
+        for c in columns:
+            val = r[c]
+            al = "right" if c in _RIGHT else "left"
+            txt = _fmt_cell(c, val)
+            clr = _cell_color(c, val)
+            fw = "700" if c == "S&R" else "600" if c == "SG" else "500"
+            fs = "0.87rem" if c == "SG" else "0.84rem"
+            cells += (
+                f'<td style="text-align:{al};padding:10px 16px;color:{clr};font-weight:{fw};'
+                f'font-size:{fs};border-bottom:1px solid {BORDER};white-space:nowrap;">{txt}</td>'
+            )
+        body += (
+            f'<tr style="background:{row_bg};transition:background .12s;" '
+            f'onmouseover="this.style.background=\'{SURFACE}\'" '
+            f'onmouseout="this.style.background=\'{row_bg}\'">{cells}</tr>'
+        )
+
+    return (
+        f'<div style="border:1px solid {BORDER};border-radius:14px;overflow:hidden;">'
+        f'<div style="max-height:{max_h}px;overflow-y:auto;">'
+        f'<table style="width:100%;border-collapse:collapse;background:{BG};font-family:\'DM Sans\',sans-serif;">'
+        f'<thead><tr>{hdr}</tr></thead><tbody>{body}</tbody></table></div></div>'
+    )
+
+# ──────────────────────────────────────────────
+# TOP/FLOP CARD (NO DEC, NO PART, NO WOW)
+# ──────────────────────────────────────────────
+def _card(sg, bloc, sr, ytd, accent):
+    sr_c = GREEN if (pd.notna(sr) and sr >= 0) else RED
+    def _r(label, value, color=PRIMARY):
+        return (
+            f'<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:0.85rem;">'
+            f'<span style="color:{MUTED};font-weight:500;">{label}</span>'
+            f'<span style="color:{color};font-weight:600;">{value}</span></div>'
+        )
+    return (
+        f'<div style="background:{BG};border:1px solid {BORDER};border-radius:14px;'
+        f'padding:16px 20px;margin-bottom:12px;border-left:4px solid {accent};'
+        f'box-shadow:0 1px 4px rgba(15,23,42,.03);">'
+        f'<div style="font-weight:700;color:{PRIMARY};font-size:1.05rem;margin-bottom:1px;">{sg}</div>'
+        f'<div style="color:{MUTED};font-weight:500;font-size:0.78rem;margin-bottom:12px;'
+        f'text-transform:uppercase;letter-spacing:0.04em;">{bloc}</div>'
+        + _r("S&R", fmt_money(sr), sr_c)
+        + _r("YTD", fmt_money(ytd))
+        + '</div>'
+    )
+
+# ══════════════════════════════════════════════
+#  LAYOUT
+# ══════════════════════════════════════════════
 cH1, cH2 = st.columns([1, 6])
 with cH1:
-    if logo_path is not None:
+    if logo_path:
         st.image(str(logo_path), use_container_width=True)
 with cH2:
     st.markdown(
-        f"""
-        <div style="display:flex; align-items:center; gap:12px;">
-          <div style="width:10px; height:44px; border-radius:10px; background:{BLACK};"></div>
-          <div>
-            <div style="font-size:28px; font-weight:900; color:{BLACK}; line-height:1.05;">
-              Dashboard S&amp;R — ASFIM
-            </div>
-            <div style="color:{BLACK}; font-weight:650;">
-              Pilotage des flux — vue marché, classements et tendances
-            </div>
-          </div>
-        </div>
-        """,
+        f'<div style="display:flex;align-items:center;gap:14px;padding:8px 0;">'
+        f'<div style="width:4px;height:48px;border-radius:4px;background:{ACCENT};"></div><div>'
+        f'<div style="font-size:1.65rem;font-weight:700;color:{PRIMARY};line-height:1.1;">Dashboard S&amp;R — ASFIM</div>'
+        f'<div style="color:{SECONDARY};font-weight:500;font-size:0.95rem;margin-top:2px;">Pilotage des flux — vue marché, classements et tendances</div>'
+        f'</div></div>',
         unsafe_allow_html=True,
     )
 
-# ==========================================================
-# Sidebar
-# ==========================================================
 with st.sidebar:
-    st.markdown(
-        f"<div style='font-weight:900; color:{BLACK}; font-size:16px;'>Paramètres</div>",
-        unsafe_allow_html=True,
-    )
+    st.markdown(f"<div style='font-weight:700;color:{PRIMARY};font-size:1rem;'>Paramètres</div>", unsafe_allow_html=True)
     st.markdown("---")
     up = st.file_uploader("Uploader Analyse_SR.xlsx", type=["xlsx"])
     st.markdown("---")
-    bloc_filter = st.multiselect(
-        "Blocs",
-        ["ACTIONS", "DIVERSIFIES", "OMLT"],
-        default=["ACTIONS", "DIVERSIFIES", "OMLT"],
-    )
+    bloc_filter = st.multiselect("Blocs", ["ACTIONS", "DIVERSIFIES", "OMLT"], default=["ACTIONS", "DIVERSIFIES", "OMLT"])
     search_sg = st.text_input("Rechercher une SG", value="")
     st.markdown("---")
-    show_data_tab = st.checkbox("Afficher l’onglet Data (audit)", value=False)
+    show_audit = st.checkbox("Afficher l'onglet Data (audit)", value=False)
 
 if up is None:
-    st.info("Upload le fichier pour afficher le dashboard.")
+    st.info("Importez le fichier **Analyse_SR.xlsx** pour afficher le dashboard.")
     st.stop()
 
-# ==========================================================
-# Read + parse
-# ==========================================================
 xlsx_bytes = up.getvalue()
 xls = pd.ExcelFile(io.BytesIO(xlsx_bytes), engine="openpyxl")
 
 recap_name = None
 for sh in xls.sheet_names:
-    l = sh.lower()
-    if "recap" in l and ("s&r" in l or "sr" in l):
+    low = sh.lower()
+    if "recap" in low and ("s&r" in low or "sr" in low):
         recap_name = sh
         break
 if recap_name is None:
@@ -604,77 +499,54 @@ if recap_name is None:
             recap_name = sh
             break
 if recap_name is None:
-    st.error("Je ne trouve pas de feuille 'Recap S&R' dans ce fichier.")
+    st.error("Feuille 'Recap S&R' introuvable.")
     st.stop()
 
-df_recap = read_recap_sheet_bytes(xlsx_bytes, recap_name)
+df_recap = read_recap(xlsx_bytes, recap_name)
 tidy = parse_recap_sr(df_recap)
-
 if tidy.empty:
-    st.error("Impossible d’extraire les données de la feuille Recap S&R (structure non détectée).")
+    st.error("Impossible d'extraire les données.")
     st.stop()
 
-YEAR_FOR_DATES = date.today().year
-tidy["Date_dt"] = tidy["Date"].apply(lambda s: ddmm_to_dt(s, YEAR_FOR_DATES))
+YEAR = date.today().year
+tidy["Date_dt"] = tidy["Date"].apply(lambda s: ddmm_to_dt(s, YEAR))
 
-with st.expander("🔎 Diagnostic détection blocs"):
-    st.write("Feuille utilisée:", recap_name)
-    st.write("Dates détectées:", sorted(tidy["Date"].unique().tolist(), key=mmdd_sort_key))
-    st.write("Lignes par bloc:", tidy["Bloc"].value_counts())
+with st.expander("Diagnostic détection blocs"):
+    st.write("Feuille :", recap_name)
+    st.write("Dates :", sorted(tidy["Date"].unique().tolist(), key=mmdd_sort))
+    st.write("Lignes/bloc :", tidy["Bloc"].value_counts())
 
 tidy = tidy[tidy["Bloc"].isin(bloc_filter)]
 if search_sg.strip():
     tidy = tidy[tidy["SG"].str.contains(search_sg.strip(), case=False, na=False)]
 
-dates = sorted(tidy["Date"].dropna().unique().tolist(), key=mmdd_sort_key)
+dates = sorted(tidy["Date"].dropna().unique().tolist(), key=mmdd_sort)
 if not dates:
     st.error("Aucune date détectée.")
     st.stop()
 
 last_date = dates[-1]
-prev_date = dates[-2] if len(dates) >= 2 else None
 
-cA, cB = st.columns([2, 1])
+cA, _ = st.columns([2, 1])
 with cA:
-    date_selected = st.select_slider("Date (S&R)", options=dates, value=last_date)
-with cB:
-    st.caption("Comparaison")
-    st.write(f"Semaine précédente: **{prev_date or '—'}**")
+    date_sel = st.select_slider("Date (S&R)", options=dates, value=last_date)
 
+# ──────────────────────────────────────────────
+# RANKING TABLE (NO DEC, NO PART, KEEP YTD)
+# ──────────────────────────────────────────────
 pivot = tidy.pivot_table(index=["Bloc", "SG"], columns="Date", values="SR", aggfunc="sum").reset_index()
 pivot.columns.name = None
 
 ytd_map = tidy.groupby(["Bloc", "SG"])["YTD_row"].max().reset_index().rename(columns={"YTD_row": "YTD"})
-dec_map = tidy.groupby(["Bloc", "SG"])["DEC"].max().reset_index().rename(columns={"DEC": "DEC"})
-part_map = tidy.groupby(["Bloc", "SG"])["PART_row"].max().reset_index().rename(columns={"PART_row": "PART"})
 
-df_rank = (
-    pivot.merge(ytd_map, on=["Bloc", "SG"], how="left")
-    .merge(dec_map, on=["Bloc", "SG"], how="left")
-    .merge(part_map, on=["Bloc", "SG"], how="left")
-)
-
-df_rank["SR_sel"] = df_rank.get(date_selected, np.nan)
-if prev_date:
-    df_rank["SR_prev"] = df_rank.get(prev_date, np.nan)
-    df_rank["WoW_abs"] = df_rank["SR_sel"] - df_rank["SR_prev"]
-else:
-    df_rank["SR_prev"] = np.nan
-    df_rank["WoW_abs"] = np.nan
+df_rank = pivot.merge(ytd_map, on=["Bloc", "SG"], how="left")
+df_rank["SR_sel"] = df_rank.get(date_sel, np.nan)
 
 total_sel = df_rank["SR_sel"].sum(skipna=True)
-total_prev = df_rank["SR_prev"].sum(skipna=True) if prev_date else np.nan
-wow_total = total_sel - total_prev if prev_date else np.nan
 
 st.markdown(
-    f"""
-    <div style="background:{WHITE}; border:1px solid {BORDER}; border-radius:14px; padding:12px 14px; margin-top:10px;">
-      <span style="color:{BLACK}; font-weight:900;">Note :</span>
-      <span style="color:{BLACK}; font-weight:650;">
-        Décembre / YTD / Part S&amp;R sont affichés tels qu’ils existent dans l’Excel.
-      </span>
-    </div>
-    """,
+    f'<div style="background:{SURFACE};border:1px solid {BORDER};border-radius:10px;padding:10px 14px;margin:10px 0 16px 0;font-size:0.86rem;color:{SECONDARY};">'
+    f'<strong style="color:{PRIMARY};">Note :</strong> Le YTD provient directement de l\'Excel.</div>',
     unsafe_allow_html=True,
 )
 
@@ -684,156 +556,127 @@ nb_pos = int((sg_global["SR_sel"] > 0).sum())
 nb_neg = int((sg_global["SR_sel"] < 0).sum())
 
 k1, k2, k3, k4, k5 = st.columns(5)
-k1.metric("Date", date_selected)
-k2.metric("Collecte nette (S&R)", format_money(total_sel), delta=(format_money(wow_total) if prev_date else None))
+k1.metric("Date", date_sel)
+k2.metric("Collecte nette (S&R)", fmt_money(total_sel))
 k3.metric("# SG", nb_sg)
 k4.metric("SG en collecte", nb_pos)
 k5.metric("SG en décollecte", nb_neg)
 
 st.markdown("---")
 
-left, right = st.columns([1.2, 1])
+# ── CLASSEMENT ──
+st.subheader("Classement SG (S&R)")
+tmp = df_rank.copy().sort_values("SR_sel", ascending=False)
+tmp["S&R"] = tmp["SR_sel"]
 
-with left:
-    st.subheader("🏆 Classement SG (S&R)")
-    tmp = df_rank.copy().sort_values("SR_sel", ascending=False)
-    tmp["S&R"] = tmp["SR_sel"]
-    tmp["WoW"] = tmp["WoW_abs"]
-    cols = ["Bloc", "SG", "S&R", "WoW", "DEC", "YTD", "PART"]
-    cols = [c for c in cols if c in tmp.columns]
-    st.dataframe(tmp[cols].head(50), use_container_width=True, height=560)
-
-with right:
-    st.subheader("⚡ Top / Flop")
-
-    top3 = df_rank.sort_values("SR_sel", ascending=False).head(3)
-    flop3 = df_rank.sort_values("SR_sel", ascending=True).head(3)
-
-    def card(sg, bloc, sr, wow, dec, ytd, part):
-        return f"""
-        <div style="background:{WHITE}; border:1px solid {BORDER}; border-radius:14px; padding:12px 12px; margin-bottom:10px;">
-          <div style="font-weight:900; color:{BLACK}; font-size:21px; letter-spacing:-0.6px; margin-bottom:6px;">{sg}</div>
-          <div style="color:{BLACK}; font-weight:800; margin-top:-2px; margin-bottom:8px;">Bloc: {bloc}</div>
-          <div style="margin-top:6px; font-weight:900; color:{BLACK};">S&amp;R: {format_money(sr)}</div>
-          <div style="color:{BLACK}; font-weight:650;">WoW: {format_money(wow) if prev_date else "—"}</div>
-          <div style="color:{BLACK}; font-weight:650;">Déc: {format_money(dec)}</div>
-          <div style="color:{BLACK}; font-weight:650;">YTD: {format_money(ytd)}</div>
-          <div style="color:{BLACK}; font-weight:650;">Part: {format_pct(part)}</div>
-        </div>
-        """
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-        st.markdown("**Top 3 (collecte)**")
-        for _, r in top3.iterrows():
-            st.markdown(
-                card(
-                    r["SG"], r["Bloc"],
-                    r["SR_sel"], r["WoW_abs"],
-                    r.get("DEC", np.nan), r.get("YTD", np.nan), r.get("PART", np.nan),
-                ),
-                unsafe_allow_html=True,
-            )
-
-    with c2:
-        st.markdown("**Flop 3 (décollecte)**")
-        for _, r in flop3.iterrows():
-            st.markdown(
-                card(
-                    r["SG"], r["Bloc"],
-                    r["SR_sel"], r["WoW_abs"],
-                    r.get("DEC", np.nan), r.get("YTD", np.nan), r.get("PART", np.nan),
-                ),
-                unsafe_allow_html=True,
-            )
+show_cols = ["Bloc", "SG", "S&R", "YTD"]
+st.markdown(
+    html_table(tmp[show_cols].head(50).reset_index(drop=True), show_cols, max_h=520),
+    unsafe_allow_html=True,
+)
 
 st.markdown("---")
 
-st.subheader("📈 Tendances (market view)")
+# ── TOP / FLOP ──
+st.subheader("Top / Flop")
+top3 = tmp.head(3)
+flop3 = tmp.sort_values("SR_sel", ascending=True).head(3)
 
+col_t, col_f = st.columns(2)
+with col_t:
+    st.markdown(f'<div style="font-weight:700;color:{GREEN};font-size:0.95rem;margin-bottom:8px;">Top 3 — collecte</div>', unsafe_allow_html=True)
+    for _, r in top3.iterrows():
+        st.markdown(_card(r["SG"], r["Bloc"], r["SR_sel"], r.get("YTD", np.nan), GREEN), unsafe_allow_html=True)
+
+with col_f:
+    st.markdown(f'<div style="font-weight:700;color:{RED};font-size:0.95rem;margin-bottom:8px;">Flop 3 — décollecte</div>', unsafe_allow_html=True)
+    for _, r in flop3.iterrows():
+        st.markdown(_card(r["SG"], r["Bloc"], r["SR_sel"], r.get("YTD", np.nan), RED), unsafe_allow_html=True)
+
+st.markdown("---")
+
+# ── TENDANCES ──
+st.subheader("Tendances (market view)")
 tabs = st.tabs(["Global", "ACTIONS", "DIVERSIFIES", "OMLT"])
 
 with tabs[0]:
-    g = tidy.groupby("Date_dt", as_index=False)["SR"].sum().sort_values("Date_dt").set_index("Date_dt")
-    st.line_chart(g["SR"])
+    g = tidy.groupby("Date_dt", as_index=False)["SR"].sum().sort_values("Date_dt")
+    st.altair_chart(line_chart(g, "Date_dt", "SR", title="Collecte nette globale S&R"), use_container_width=True)
 
 with tabs[1]:
-    tr = (
-        tidy[tidy["Bloc"] == "ACTIONS"]
-        .groupby("Date_dt", as_index=False)["SR"]
-        .sum()
-        .sort_values("Date_dt")
-        .set_index("Date_dt")
-    )
-    st.line_chart(tr["SR"])
+    d = tidy[tidy["Bloc"] == "ACTIONS"].groupby("Date_dt", as_index=False)["SR"].sum().sort_values("Date_dt")
+    st.altair_chart(line_chart(d, "Date_dt", "SR", title="ACTIONS — S&R"), use_container_width=True)
 
 with tabs[2]:
-    tr = (
-        tidy[tidy["Bloc"] == "DIVERSIFIES"]
-        .groupby("Date_dt", as_index=False)["SR"]
-        .sum()
-        .sort_values("Date_dt")
-        .set_index("Date_dt")
-    )
-    st.line_chart(tr["SR"])
+    d = tidy[tidy["Bloc"] == "DIVERSIFIES"].groupby("Date_dt", as_index=False)["SR"].sum().sort_values("Date_dt")
+    st.altair_chart(line_chart(d, "Date_dt", "SR", title="DIVERSIFIÉS — S&R"), use_container_width=True)
 
 with tabs[3]:
-    tr = (
-        tidy[tidy["Bloc"] == "OMLT"]
-        .groupby("Date_dt", as_index=False)["SR"]
-        .sum()
-        .sort_values("Date_dt")
-        .set_index("Date_dt")
-    )
-    st.line_chart(tr["SR"])
+    d = tidy[tidy["Bloc"] == "OMLT"].groupby("Date_dt", as_index=False)["SR"].sum().sort_values("Date_dt")
+    st.altair_chart(line_chart(d, "Date_dt", "SR", title="OMLT — S&R"), use_container_width=True)
 
 st.markdown("---")
 
-st.subheader("🔎 Drill-down : une Société de Gestion")
-sg_list = sorted(df_rank["SG"].unique().tolist())
+# ── DRILL-DOWN ──
+st.subheader("Drill-down : Société de Gestion")
+sg_list = sorted(df_rank["SG"].dropna().unique().tolist())
 if not sg_list:
-    st.warning("Aucune SG après filtres.")
+    st.warning("Aucune SG.")
     st.stop()
 
 sg_pick = st.selectbox("Choisir une SG", sg_list, index=0)
-sg_meta = df_rank[df_rank["SG"] == sg_pick].head(1)
 
-m1, m2, m3 = st.columns(3)
-with m1:
-    st.metric("Décembre", format_money(float(sg_meta["DEC"].iloc[0])) if "DEC" in sg_meta else "—")
-with m2:
-    st.metric("YTD", format_money(float(sg_meta["YTD"].iloc[0])) if "YTD" in sg_meta else "—")
-with m3:
-    st.metric("Part S&R", format_pct(float(sg_meta["PART"].iloc[0])) if "PART" in sg_meta else "—")
+sg_meta = df_rank[df_rank["SG"] == sg_pick].head(1)
+st.metric("YTD", fmt_money(float(sg_meta["YTD"].iloc[0])) if ("YTD" in sg_meta and len(sg_meta) > 0) else "—")
 
 sg_tidy = tidy[tidy["SG"] == sg_pick].copy()
 
-sg_piv = (
-    sg_tidy.pivot_table(index="Date_dt", columns="Bloc", values="SR", aggfunc="sum")
-    .fillna(0)
-    .sort_index()
-)
-
-dt_selected = ddmm_to_dt(date_selected, YEAR_FOR_DATES)
-
 c1, c2 = st.columns([1.2, 1])
+
 with c1:
-    st.markdown("**Courbe S&R par bloc**")
-    st.line_chart(sg_piv)
+    st.markdown(f'<div style="font-weight:700;color:{PRIMARY};margin-bottom:4px;">Courbe S&R par bloc</div>', unsafe_allow_html=True)
+    sg_cd = sg_tidy.groupby(["Date_dt", "Bloc"], as_index=False)["SR"].sum()
+    if not sg_cd.empty:
+        st.altair_chart(line_chart(sg_cd, "Date_dt", "SR", color="Bloc", title=f"{sg_pick} — S&R par bloc"), use_container_width=True)
 
 with c2:
-    st.markdown("**Résumé à la date sélectionnée**")
-    if dt_selected in sg_piv.index:
-        row = sg_piv.loc[dt_selected]
-    else:
+    st.markdown(f'<div style="font-weight:700;color:{PRIMARY};margin-bottom:4px;">Résumé à la dernière date</div>', unsafe_allow_html=True)
+    sg_piv = (
+        sg_tidy.pivot_table(index="Date_dt", columns="Bloc", values="SR", aggfunc="sum")
+        .fillna(0)
+        .sort_index()
+    )
+    if not sg_piv.empty:
         row = sg_piv.iloc[-1]
+        for b in ["ACTIONS", "DIVERSIFIES", "OMLT"]:
+            if b in row.index:
+                st.metric(b, fmt_money(float(row[b])))
 
-    for b in ["ACTIONS", "DIVERSIFIES", "OMLT"]:
-        if b in row.index:
-            st.metric(b, format_money(float(row[b])))
-
-if show_data_tab:
+if show_audit:
     st.markdown("---")
-    st.subheader("🧾 Data (audit)")
-    st.dataframe(tidy.drop(columns=["Date_dt"]), use_container_width=True, height=560)
+    st.subheader("Data (audit)")
+    audit = tidy.drop(columns=["Date_dt"]).reset_index(drop=True)
+    acols = list(audit.columns)
+
+    hdr = "".join(
+        f'<th style="text-align:left;padding:8px 12px;font-weight:600;font-size:0.72rem;color:{MUTED};letter-spacing:0.05em;text-transform:uppercase;border-bottom:2px solid {BORDER};background:{SURFACE};position:sticky;top:0;z-index:1;">{c}</th>'
+        for c in acols
+    )
+
+    bdy = ""
+    for i in range(len(audit)):
+        r = audit.iloc[i]
+        row_bg = BG if i % 2 == 0 else SURFACE
+        cells = "".join(
+            f'<td style="text-align:left;padding:7px 12px;color:{PRIMARY};font-size:0.82rem;border-bottom:1px solid {BORDER};white-space:nowrap;">{"—" if pd.isna(r[c]) else str(r[c])}</td>'
+            for c in acols
+        )
+        bdy += f'<tr style="background:{row_bg};">{cells}</tr>'
+
+    st.markdown(
+        f'<div style="border:1px solid {BORDER};border-radius:14px;overflow:hidden;">'
+        f'<div style="max-height:560px;overflow-y:auto;">'
+        f'<table style="width:100%;border-collapse:collapse;background:{BG};font-family:\'DM Sans\',sans-serif;">'
+        f'<thead><tr>{hdr}</tr></thead><tbody>{bdy}</tbody></table></div></div>',
+        unsafe_allow_html=True,
+    )
