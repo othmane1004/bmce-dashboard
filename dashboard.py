@@ -237,6 +237,195 @@ def find_col(cols, patterns):
                 return c
     return None
 
+def apply_weekly_bridge_fix(tidy, eps=1e-9):
+    """Fix known bridge-day anomaly where weekly SG appears on Mon/Tue.
+
+    If a SG is active on 02/02 and 03/02, exactly zero on 04/02, and active again
+    on 06/02, we neutralize 02/02 and 03/02 for that SG.
+    """
+    if tidy.empty:
+        return tidy
+
+    needed = {"02/02", "03/02", "04/02", "06/02"}
+    if not needed.issubset(set(tidy["Date"].dropna().unique().tolist())):
+        return tidy
+
+    sg_date = tidy.groupby(["SG", "Date"], as_index=False)["SR"].sum(min_count=1)
+    piv = sg_date.pivot(index="SG", columns="Date", values="SR")
+    for d in needed:
+        if d not in piv.columns:
+            return tidy
+    piv = piv.fillna(0.0)
+
+    weekly_sg = piv[
+        (piv["02/02"].abs() > eps)
+        & (piv["03/02"].abs() > eps)
+        & (piv["04/02"].abs() <= eps)
+        & (piv["06/02"].abs() > eps)
+    ].index.tolist()
+
+    if not weekly_sg:
+        return tidy
+
+    out = tidy.copy()
+    mask = out["SG"].isin(weekly_sg) & out["Date"].isin(["02/02", "03/02"])
+    out.loc[mask, "SR"] = 0.0
+    return out
+
+def read_tcd_daily_totals(xlsx_bytes):
+    """Read daily totals directly from pivot-table sheet (Grand Total row)."""
+    try:
+        xls = pd.ExcelFile(io.BytesIO(xlsx_bytes), engine="openpyxl")
+    except Exception:
+        return {}
+
+    tcd_name = None
+    for sh in xls.sheet_names:
+        low = sh.lower()
+        if ("tableau" in low and "crois" in low) or ("pivot" in low):
+            tcd_name = sh
+            break
+    if tcd_name is None:
+        return {}
+
+    try:
+        raw = pd.read_excel(io.BytesIO(xlsx_bytes), sheet_name=tcd_name, header=None, engine="openpyxl")
+    except Exception:
+        return {}
+    if raw.empty:
+        return {}
+
+    # Find the row that carries date-like headers.
+    hdr_idx = None
+    best = -1
+    for i in range(len(raw)):
+        row = raw.iloc[i]
+        sc = sum(1 for v in row.values if norm_ddmm(v))
+        if sc > best:
+            best = sc
+            hdr_idx = i
+    if hdr_idx is None or best <= 0:
+        return {}
+
+    hdr = raw.iloc[hdr_idx]
+    col_to_date = {}
+    for j, v in enumerate(hdr.values):
+        d = norm_ddmm(v)
+        if d:
+            col_to_date[j] = d
+    if not col_to_date:
+        return {}
+
+    # Find Grand Total / Total row.
+    total_idx = None
+    for i in range(hdr_idx + 1, len(raw)):
+        first = raw.iat[i, 0] if raw.shape[1] > 0 else None
+        s = str(first).strip().lower() if pd.notna(first) else ""
+        if any(k in s for k in ["grand total", "total général", "total general", "total"]):
+            total_idx = i
+            if "grand total" in s or "général" in s or "general" in s:
+                break
+    if total_idx is None:
+        return {}
+
+    out = {}
+    for j, d in col_to_date.items():
+        out[d] = to_float(raw.iat[total_idx, j])
+    return out
+
+def read_tcd_sg_daily(xlsx_bytes):
+    """Read SG/day values directly from pivot-table sheet."""
+    try:
+        xls = pd.ExcelFile(io.BytesIO(xlsx_bytes), engine="openpyxl")
+    except Exception:
+        return pd.DataFrame(columns=["SG", "Date", "SR"])
+
+    tcd_name = None
+    for sh in xls.sheet_names:
+        low = sh.lower()
+        if ("tableau" in low and "crois" in low) or ("pivot" in low):
+            tcd_name = sh
+            break
+    if tcd_name is None:
+        return pd.DataFrame(columns=["SG", "Date", "SR"])
+
+    try:
+        raw = pd.read_excel(io.BytesIO(xlsx_bytes), sheet_name=tcd_name, header=None, engine="openpyxl")
+    except Exception:
+        return pd.DataFrame(columns=["SG", "Date", "SR"])
+    if raw.empty:
+        return pd.DataFrame(columns=["SG", "Date", "SR"])
+
+    hdr_idx = None
+    best = -1
+    for i in range(len(raw)):
+        row = raw.iloc[i]
+        sc = sum(1 for v in row.values if norm_ddmm(v))
+        if sc > best:
+            best = sc
+            hdr_idx = i
+    if hdr_idx is None or best <= 0:
+        return pd.DataFrame(columns=["SG", "Date", "SR"])
+
+    hdr = raw.iloc[hdr_idx]
+    col_to_date = {}
+    for j, v in enumerate(hdr.values):
+        d = norm_ddmm(v)
+        if d:
+            col_to_date[j] = d
+    if not col_to_date:
+        return pd.DataFrame(columns=["SG", "Date", "SR"])
+
+    rows = []
+    for i in range(hdr_idx + 1, len(raw)):
+        sg = raw.iat[i, 0] if raw.shape[1] > 0 else None
+        if pd.isna(sg):
+            continue
+        sg = str(sg).strip()
+        if not sg:
+            continue
+        sgl = sg.lower()
+        if any(k in sgl for k in ["grand total", "total général", "total general", "total"]):
+            continue
+        for j, d in col_to_date.items():
+            rows.append({
+                "SG": sg,
+                "Date": d,
+                "SR": to_float(raw.iat[i, j]),
+            })
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    out = out.groupby(["SG", "Date"], as_index=False)["SR"].sum(min_count=1)
+    return out
+
+def read_asfim_sg_classification(xlsx_bytes):
+    """Read SG -> Classification mapping from ASFIM sheet."""
+    try:
+        df = pd.read_excel(io.BytesIO(xlsx_bytes), sheet_name="ASFIM", header=1, engine="openpyxl")
+    except Exception:
+        return pd.DataFrame(columns=["SG", "Classification"])
+    if df.empty:
+        return pd.DataFrame(columns=["SG", "Classification"])
+
+    sg_col = find_col(df.columns, ["société de gestion", "societe de gestion"])
+    cls_col = find_col(df.columns, ["classification"])
+    if sg_col is None or cls_col is None:
+        return pd.DataFrame(columns=["SG", "Classification"])
+
+    out = df[[sg_col, cls_col]].copy()
+    out.columns = ["SG", "Classification"]
+    out["SG"] = out["SG"].astype(str).str.strip()
+    out["Classification"] = out["Classification"].astype(str).str.strip()
+    out = out[
+        out["SG"].ne("")
+        & out["Classification"].ne("")
+        & out["SG"].str.lower().ne("nan")
+        & out["Classification"].str.lower().ne("nan")
+    ].drop_duplicates().reset_index(drop=True)
+    return out
+
 # ──────────────────────────────────────────────
 # EXCEL READER
 # ──────────────────────────────────────────────
@@ -373,6 +562,7 @@ def line_chart(data, x, y, color=None, title="", h=340):
 # HTML TABLE (NO DEC, NO PART, NO WOW)
 # ──────────────────────────────────────────────
 _COL_LABELS = {
+    "Classification": "CLASSIFICATION",
     "Bloc": "BLOC",
     "SG": "SOCIÉTÉ DE GESTION",
     "S&R": "S&R",
@@ -475,9 +665,6 @@ with st.sidebar:
     st.markdown("---")
     up = st.file_uploader("Uploader Analyse_SR.xlsx", type=["xlsx"])
     st.markdown("---")
-    bloc_filter = st.multiselect("Blocs", ["ACTIONS", "DIVERSIFIES", "OMLT"], default=["ACTIONS", "DIVERSIFIES", "OMLT"])
-    search_sg = st.text_input("Rechercher une SG", value="")
-    st.markdown("---")
     show_audit = st.checkbox("Afficher l'onglet Data (audit)", value=False)
 
 if up is None:
@@ -486,6 +673,29 @@ if up is None:
 
 xlsx_bytes = up.getvalue()
 xls = pd.ExcelFile(io.BytesIO(xlsx_bytes), engine="openpyxl")
+tcd_totals = read_tcd_daily_totals(xlsx_bytes)
+tcd_sg_daily = read_tcd_sg_daily(xlsx_bytes)
+asfim_cls_map = read_asfim_sg_classification(xlsx_bytes)
+
+if not asfim_cls_map.empty:
+    class_options = sorted(asfim_cls_map["Classification"].dropna().unique().tolist())
+    with st.sidebar:
+        st.markdown("---")
+        class_filter = st.multiselect("Classification", class_options, default=class_options)
+        search_sg = st.text_input("Rechercher une SG", value="")
+    allowed_sg_sidebar = set(
+        asfim_cls_map.loc[asfim_cls_map["Classification"].isin(class_filter), "SG"]
+        .dropna()
+        .unique()
+        .tolist()
+    )
+else:
+    class_options = ["ACTIONS", "DIVERSIFIES", "OMLT"]
+    with st.sidebar:
+        st.markdown("---")
+        class_filter = st.multiselect("Blocs", class_options, default=class_options)
+        search_sg = st.text_input("Rechercher une SG", value="")
+    allowed_sg_sidebar = None
 
 recap_name = None
 for sh in xls.sheet_names:
@@ -504,9 +714,13 @@ if recap_name is None:
 
 df_recap = read_recap(xlsx_bytes, recap_name)
 tidy = parse_recap_sr(df_recap)
+tidy = apply_weekly_bridge_fix(tidy)
 if tidy.empty:
     st.error("Impossible d'extraire les données.")
     st.stop()
+
+# Keep an unfiltered copy for drill-down category filtering.
+tidy_all = tidy.copy()
 
 YEAR = date.today().year
 tidy["Date_dt"] = tidy["Date"].apply(lambda s: ddmm_to_dt(s, YEAR))
@@ -516,7 +730,10 @@ with st.expander("Diagnostic détection blocs"):
     st.write("Dates :", sorted(tidy["Date"].unique().tolist(), key=mmdd_sort))
     st.write("Lignes/bloc :", tidy["Bloc"].value_counts())
 
-tidy = tidy[tidy["Bloc"].isin(bloc_filter)]
+if allowed_sg_sidebar is not None:
+    tidy = tidy[tidy["SG"].isin(allowed_sg_sidebar)]
+else:
+    tidy = tidy[tidy["Bloc"].isin(class_filter)]
 if search_sg.strip():
     tidy = tidy[tidy["SG"].str.contains(search_sg.strip(), case=False, na=False)]
 
@@ -534,7 +751,12 @@ with cA:
 # ──────────────────────────────────────────────
 # RANKING TABLE (NO DEC, NO PART, KEEP YTD)
 # ──────────────────────────────────────────────
-pivot = tidy.pivot_table(index=["Bloc", "SG"], columns="Date", values="SR", aggfunc="sum").reset_index()
+pivot = (
+    tidy.groupby(["Bloc", "SG", "Date"], as_index=False)["SR"]
+    .sum(min_count=1)
+    .pivot(index=["Bloc", "SG"], columns="Date", values="SR")
+    .reset_index()
+)
 pivot.columns.name = None
 
 ytd_map = tidy.groupby(["Bloc", "SG"])["YTD_row"].max().reset_index().rename(columns={"YTD_row": "YTD"})
@@ -542,7 +764,10 @@ ytd_map = tidy.groupby(["Bloc", "SG"])["YTD_row"].max().reset_index().rename(col
 df_rank = pivot.merge(ytd_map, on=["Bloc", "SG"], how="left")
 df_rank["SR_sel"] = df_rank.get(date_sel, np.nan)
 
-total_sel = df_rank["SR_sel"].sum(skipna=True)
+# KPI total must come directly from pivot table (Grand Total by date).
+total_sel = tcd_totals.get(date_sel, np.nan)
+if pd.isna(total_sel):
+    total_sel = df_rank["SR_sel"].sum(skipna=True)
 
 st.markdown(
     f'<div style="background:{SURFACE};border:1px solid {BORDER};border-radius:10px;padding:10px 14px;margin:10px 0 16px 0;font-size:0.86rem;color:{SECONDARY};">'
@@ -550,10 +775,15 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-sg_global = df_rank.groupby("SG", as_index=False).agg(SR_sel=("SR_sel", "sum"))
-nb_sg = int(sg_global["SG"].nunique())
-nb_pos = int((sg_global["SR_sel"] > 0).sum())
-nb_neg = int((sg_global["SR_sel"] < 0).sum())
+sg_global = (
+    df_rank.groupby("SG", as_index=False)["SR_sel"]
+    .sum(min_count=1)
+)
+eps = 1e-9
+sg_active = sg_global[sg_global["SR_sel"].abs() > eps]
+nb_sg = int(sg_active["SG"].nunique())
+nb_pos = int((sg_active["SR_sel"] > eps).sum())
+nb_neg = int((sg_active["SR_sel"] < -eps).sum())
 
 k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("Date", date_sel)
@@ -566,32 +796,67 @@ st.markdown("---")
 
 # ── CLASSEMENT ──
 st.subheader("Classement SG (S&R)")
-tmp = df_rank.copy().sort_values("SR_sel", ascending=False)
-tmp["S&R"] = tmp["SR_sel"]
+rank_cls_options = ["TOUS"] + sorted(asfim_cls_map["Classification"].dropna().unique().tolist()) if not asfim_cls_map.empty else ["TOUS"]
+rank_cls_sel = st.selectbox("Filtre classement (overall)", rank_cls_options, index=0)
 
-show_cols = ["Bloc", "SG", "S&R", "YTD"]
-st.markdown(
-    html_table(tmp[show_cols].head(50).reset_index(drop=True), show_cols, max_h=520),
-    unsafe_allow_html=True,
-)
+if not tcd_sg_daily.empty:
+    rank_src = tcd_sg_daily.copy()
+    if not asfim_cls_map.empty:
+        rank_src = rank_src.merge(asfim_cls_map, on="SG", how="left")
+    else:
+        rank_src["Classification"] = "TOUS"
+
+    if rank_cls_sel != "TOUS":
+        rank_src = rank_src[rank_src["Classification"] == rank_cls_sel]
+    if search_sg.strip():
+        rank_src = rank_src[rank_src["SG"].str.contains(search_sg.strip(), case=False, na=False)]
+
+    tmp = (
+        rank_src.groupby(["Classification", "SG"], as_index=False)["SR"]
+        .sum(min_count=1)
+        .rename(columns={"SR": "S&R"})
+        .sort_values("S&R", ascending=False)
+        .reset_index(drop=True)
+    )
+    show_cols = ["Classification", "SG", "S&R"]
+else:
+    tmp = df_rank.copy().sort_values("SR_sel", ascending=False)
+    tmp["S&R"] = tmp["SR_sel"]
+    show_cols = ["Bloc", "SG", "S&R", "YTD"]
+
+if tmp.empty:
+    st.info("Aucune donnée de classement pour ce filtre.")
+else:
+    st.markdown(
+        html_table(tmp[show_cols].head(100).reset_index(drop=True), show_cols, max_h=520),
+        unsafe_allow_html=True,
+    )
 
 st.markdown("---")
 
 # ── TOP / FLOP ──
 st.subheader("Top / Flop")
-top3 = tmp.head(3)
-flop3 = tmp.sort_values("SR_sel", ascending=True).head(3)
+if "S&R" in tmp.columns:
+    top3 = tmp.sort_values("S&R", ascending=False).head(3)
+    flop3 = tmp.sort_values("S&R", ascending=True).head(3)
+else:
+    top3 = tmp.head(3)
+    flop3 = tmp.sort_values("SR_sel", ascending=True).head(3)
 
 col_t, col_f = st.columns(2)
 with col_t:
     st.markdown(f'<div style="font-weight:700;color:{GREEN};font-size:0.95rem;margin-bottom:8px;">Top 3 — collecte</div>', unsafe_allow_html=True)
     for _, r in top3.iterrows():
-        st.markdown(_card(r["SG"], r["Bloc"], r["SR_sel"], r.get("YTD", np.nan), GREEN), unsafe_allow_html=True)
+        sr_val = r["S&R"] if "S&R" in r else r.get("SR_sel", np.nan)
+        bloc_val = r.get("Classification", r.get("Bloc", "TOUS"))
+        st.markdown(_card(r["SG"], bloc_val, sr_val, r.get("YTD", np.nan), GREEN), unsafe_allow_html=True)
 
 with col_f:
     st.markdown(f'<div style="font-weight:700;color:{RED};font-size:0.95rem;margin-bottom:8px;">Flop 3 — décollecte</div>', unsafe_allow_html=True)
     for _, r in flop3.iterrows():
-        st.markdown(_card(r["SG"], r["Bloc"], r["SR_sel"], r.get("YTD", np.nan), RED), unsafe_allow_html=True)
+        sr_val = r["S&R"] if "S&R" in r else r.get("SR_sel", np.nan)
+        bloc_val = r.get("Classification", r.get("Bloc", "TOUS"))
+        st.markdown(_card(r["SG"], bloc_val, sr_val, r.get("YTD", np.nan), RED), unsafe_allow_html=True)
 
 st.markdown("---")
 
@@ -600,7 +865,18 @@ st.subheader("Tendances (market view)")
 tabs = st.tabs(["Global", "ACTIONS", "DIVERSIFIES", "OMLT"])
 
 with tabs[0]:
-    g = tidy.groupby("Date_dt", as_index=False)["SR"].sum().sort_values("Date_dt")
+    if tcd_totals:
+        g = pd.DataFrame(
+            [{"Date": d, "SR": v} for d, v in tcd_totals.items() if pd.notna(v)]
+        )
+        if not g.empty:
+            g["k"] = g["Date"].apply(mmdd_sort)
+            g = g.sort_values("k").drop(columns=["k"])
+            g["Date_dt"] = g["Date"].apply(lambda s: ddmm_to_dt(s, YEAR))
+        else:
+            g = tidy.groupby("Date_dt", as_index=False)["SR"].sum().sort_values("Date_dt")
+    else:
+        g = tidy.groupby("Date_dt", as_index=False)["SR"].sum().sort_values("Date_dt")
     st.altair_chart(line_chart(g, "Date_dt", "SR", title="Collecte nette globale S&R"), use_container_width=True)
 
 with tabs[1]:
@@ -618,18 +894,40 @@ with tabs[3]:
 st.markdown("---")
 
 # ── DRILL-DOWN ──
-st.subheader("Drill-down : Société de Gestion")
-sg_list = sorted(df_rank["SG"].dropna().unique().tolist())
+st.subheader("Société de Gestion")
+if not asfim_cls_map.empty:
+    cls_values = sorted(asfim_cls_map["Classification"].dropna().unique().tolist())
+else:
+    cls_values = ["ACTIONS", "DIVERSIFIES", "OMLT"]
+
+drill_cat = st.selectbox("Classification", ["TOUS"] + cls_values, index=0)
+
+if drill_cat == "TOUS":
+    allowed_sg = set(tidy_all["SG"].dropna().unique().tolist())
+elif not asfim_cls_map.empty:
+    allowed_sg = set(asfim_cls_map.loc[asfim_cls_map["Classification"] == drill_cat, "SG"].dropna().unique().tolist())
+else:
+    allowed_sg = set(tidy_all[tidy_all["Bloc"] == drill_cat]["SG"].dropna().unique().tolist())
+
+if not tcd_sg_daily.empty:
+    sg_list = sorted([sg for sg in tcd_sg_daily["SG"].dropna().unique().tolist() if sg in allowed_sg])
+else:
+    sg_list = sorted([sg for sg in df_rank["SG"].dropna().unique().tolist() if sg in allowed_sg])
 if not sg_list:
     st.warning("Aucune SG.")
     st.stop()
 
 sg_pick = st.selectbox("Choisir une SG", sg_list, index=0)
 
-sg_meta = df_rank[df_rank["SG"] == sg_pick].head(1)
-st.metric("YTD", fmt_money(float(sg_meta["YTD"].iloc[0])) if ("YTD" in sg_meta and len(sg_meta) > 0) else "—")
-
-sg_tidy = tidy[tidy["SG"] == sg_pick].copy()
+if not tcd_sg_daily.empty:
+    sg_tidy = tcd_sg_daily[tcd_sg_daily["SG"] == sg_pick].copy()
+    sg_tidy["Date_dt"] = sg_tidy["Date"].apply(lambda s: ddmm_to_dt(s, YEAR))
+    sg_tidy["Bloc"] = "GLOBAL"
+    st.metric("YTD", "—")
+else:
+    sg_meta = df_rank[df_rank["SG"] == sg_pick].head(1)
+    st.metric("YTD", fmt_money(float(sg_meta["YTD"].iloc[0])) if ("YTD" in sg_meta and len(sg_meta) > 0) else "—")
+    sg_tidy = tidy[tidy["SG"] == sg_pick].copy()
 
 c1, c2 = st.columns([1.2, 1])
 
@@ -648,9 +946,12 @@ with c2:
     )
     if not sg_piv.empty:
         row = sg_piv.iloc[-1]
-        for b in ["ACTIONS", "DIVERSIFIES", "OMLT"]:
-            if b in row.index:
-                st.metric(b, fmt_money(float(row[b])))
+        if "GLOBAL" in row.index:
+            st.metric("GLOBAL", fmt_money(float(row["GLOBAL"])))
+        else:
+            for b in ["ACTIONS", "DIVERSIFIES", "OMLT"]:
+                if b in row.index:
+                    st.metric(b, fmt_money(float(row[b])))
 
 if show_audit:
     st.markdown("---")
