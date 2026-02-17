@@ -212,6 +212,87 @@ def to_float(x):
 def fmt_money(x):
     return "—" if pd.isna(x) else f"{x:,.0f}".replace(",", " ")
 
+def fmt_pct(x, nd=1):
+    return "—" if pd.isna(x) else f"{x * 100:.{nd}f}%"
+
+def _norm_sg_key(s):
+    return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+def pick_bmce_sg(sg_values):
+    """Best-effort detection of BMCE Capital Gestion label in SG list."""
+    vals = [str(v).strip() for v in sg_values if str(v).strip()]
+    if not vals:
+        return None
+    scored = []
+    for sg in vals:
+        k = _norm_sg_key(sg)
+        score = 0
+        if "bmce" in k:
+            score += 5
+        if "capital" in k:
+            score += 2
+        if "gestion" in k:
+            score += 2
+        if "bmcecapitalgestion" in k:
+            score += 10
+        scored.append((score, sg))
+    scored.sort(reverse=True)
+    return scored[0][1] if scored and scored[0][0] > 0 else None
+
+def flow_series_on_market_days(flow_daily, sg, market_dates):
+    s = (
+        flow_daily[flow_daily["SG"] == sg]
+        .groupby("Date_dt")["SR"]
+        .sum(min_count=1)
+        .reindex(market_dates, fill_value=0.0)
+        .astype(float)
+    )
+    return pd.DataFrame({"Date_dt": s.index, "SR": s.values})
+
+def compute_flow_kpis(series_df, market_abs_series=None):
+    out = {
+        "ytd_net_flow": np.nan,
+        "mtd_net_flow": np.nan,
+        "last_5d_net_flow": np.nan,
+        "avg_daily_flow": np.nan,
+        "positive_day_ratio": np.nan,
+        "flow_volatility": np.nan,
+        "max_drawdown": np.nan,
+        "best_day": np.nan,
+        "worst_day": np.nan,
+        "momentum_5d_vs_prev5d": np.nan,
+        "abs_market_share": np.nan,
+    }
+    if series_df.empty:
+        return out
+
+    s = series_df["SR"].astype(float)
+    d = pd.to_datetime(series_df["Date_dt"])
+
+    out["ytd_net_flow"] = s.sum()
+    last_dt = d.max()
+    mtd_mask = (d.dt.year == last_dt.year) & (d.dt.month == last_dt.month)
+    out["mtd_net_flow"] = s[mtd_mask].sum()
+    out["last_5d_net_flow"] = s.tail(5).sum()
+    out["avg_daily_flow"] = s.mean()
+    out["positive_day_ratio"] = (s > 0).mean() if len(s) else np.nan
+    out["flow_volatility"] = s.std(ddof=0) if len(s) else np.nan
+    out["best_day"] = s.max() if len(s) else np.nan
+    out["worst_day"] = s.min() if len(s) else np.nan
+
+    if len(s) >= 10:
+        out["momentum_5d_vs_prev5d"] = s.tail(5).sum() - s.tail(10).head(5).sum()
+
+    cum = s.cumsum()
+    drawdown = cum - cum.cummax()
+    out["max_drawdown"] = abs(drawdown.min()) if len(drawdown) else np.nan
+
+    if market_abs_series is not None:
+        denom = market_abs_series.sum()
+        if abs(denom) > 1e-12:
+            out["abs_market_share"] = s.abs().sum() / denom
+    return out
+
 def is_total(s):
     t = str(s).strip().lower()
     return ("total" in t and ("gén" in t or "gen" in t)) or t == "total"
@@ -537,9 +618,12 @@ def parse_recap_sr(df):
 # ──────────────────────────────────────────────
 def line_chart(data, x, y, color=None, title="", h=340):
     base = alt.Chart(data).mark_line(strokeWidth=2.5, point=alt.OverlayMarkDef(filled=True, size=40))
-    enc = {"x": alt.X(f"{x}:T", title="Date"), "y": alt.Y(f"{y}:Q", title="S&R")}
+    enc = {
+        "x": alt.X(f"{x}:T", title="Date", axis=alt.Axis(format="%m/%d")),
+        "y": alt.Y(f"{y}:Q", title="S&R"),
+    }
     tips = [
-        alt.Tooltip(f"{x}:T", title="Date", format="%d/%m/%Y"),
+        alt.Tooltip(f"{x}:T", title="Date", format="%m/%d/%Y"),
         alt.Tooltip(f"{y}:Q", title="S&R", format=",.0f"),
     ]
     if color:
@@ -665,7 +749,7 @@ with st.sidebar:
     st.markdown("---")
     up = st.file_uploader("Uploader Analyse_SR.xlsx", type=["xlsx"])
     st.markdown("---")
-    show_audit = st.checkbox("Afficher l'onglet Data (audit)", value=False)
+    show_audit = st.checkbox("Afficher le fichier en entier", value=False)
 
 if up is None:
     st.info("Importez le fichier **Analyse_SR.xlsx** pour afficher le dashboard.")
@@ -682,7 +766,6 @@ if not asfim_cls_map.empty:
     with st.sidebar:
         st.markdown("---")
         class_filter = st.multiselect("Classification", class_options, default=class_options)
-        search_sg = st.text_input("Rechercher une SG", value="")
     allowed_sg_sidebar = set(
         asfim_cls_map.loc[asfim_cls_map["Classification"].isin(class_filter), "SG"]
         .dropna()
@@ -694,7 +777,6 @@ else:
     with st.sidebar:
         st.markdown("---")
         class_filter = st.multiselect("Blocs", class_options, default=class_options)
-        search_sg = st.text_input("Rechercher une SG", value="")
     allowed_sg_sidebar = None
 
 recap_name = None
@@ -725,17 +807,10 @@ tidy_all = tidy.copy()
 YEAR = date.today().year
 tidy["Date_dt"] = tidy["Date"].apply(lambda s: ddmm_to_dt(s, YEAR))
 
-with st.expander("Diagnostic détection blocs"):
-    st.write("Feuille :", recap_name)
-    st.write("Dates :", sorted(tidy["Date"].unique().tolist(), key=mmdd_sort))
-    st.write("Lignes/bloc :", tidy["Bloc"].value_counts())
-
 if allowed_sg_sidebar is not None:
     tidy = tidy[tidy["SG"].isin(allowed_sg_sidebar)]
 else:
     tidy = tidy[tidy["Bloc"].isin(class_filter)]
-if search_sg.strip():
-    tidy = tidy[tidy["SG"].str.contains(search_sg.strip(), case=False, na=False)]
 
 dates = sorted(tidy["Date"].dropna().unique().tolist(), key=mmdd_sort)
 if not dates:
@@ -760,6 +835,7 @@ pivot = (
 pivot.columns.name = None
 
 ytd_map = tidy.groupby(["Bloc", "SG"])["YTD_row"].max().reset_index().rename(columns={"YTD_row": "YTD"})
+ytd_sg_map = tidy.groupby("SG", as_index=False)["YTD_row"].max().rename(columns={"YTD_row": "YTD"})
 
 df_rank = pivot.merge(ytd_map, on=["Bloc", "SG"], how="left")
 df_rank["SR_sel"] = df_rank.get(date_sel, np.nan)
@@ -808,8 +884,6 @@ if not tcd_sg_daily.empty:
 
     if rank_cls_sel != "TOUS":
         rank_src = rank_src[rank_src["Classification"] == rank_cls_sel]
-    if search_sg.strip():
-        rank_src = rank_src[rank_src["SG"].str.contains(search_sg.strip(), case=False, na=False)]
 
     tmp = (
         rank_src.groupby(["Classification", "SG"], as_index=False)["SR"]
@@ -818,7 +892,8 @@ if not tcd_sg_daily.empty:
         .sort_values("S&R", ascending=False)
         .reset_index(drop=True)
     )
-    show_cols = ["Classification", "SG", "S&R"]
+    tmp = tmp.merge(ytd_sg_map, on="SG", how="left")
+    show_cols = ["Classification", "SG", "S&R", "YTD"]
 else:
     tmp = df_rank.copy().sort_values("SR_sel", ascending=False)
     tmp["S&R"] = tmp["SR_sel"]
@@ -952,6 +1027,169 @@ with c2:
             for b in ["ACTIONS", "DIVERSIFIES", "OMLT"]:
                 if b in row.index:
                     st.metric(b, fmt_money(float(row[b])))
+
+st.markdown("---")
+
+# ── COMPETITIVE FLOW PERFORMANCE ──
+st.subheader("Performance concurrentielle des flux")
+
+if not tcd_sg_daily.empty:
+    flow_daily = tcd_sg_daily.copy()
+else:
+    flow_daily = tidy_all.groupby(["SG", "Date"], as_index=False)["SR"].sum(min_count=1)
+
+flow_daily["Date_dt"] = flow_daily["Date"].apply(lambda s: ddmm_to_dt(s, YEAR))
+flow_daily = flow_daily.dropna(subset=["SG", "Date_dt"]).copy()
+
+if flow_daily.empty:
+    st.info("Données SG insuffisantes pour lancer l'analyse comparative des flux.")
+else:
+    if not asfim_cls_map.empty:
+        cmp_classes = sorted(asfim_cls_map["Classification"].dropna().unique().tolist())
+        cmp_class = st.selectbox("Type de fonds (comparaison)", ["TOUS"] + cmp_classes, index=0)
+        if cmp_class != "TOUS":
+            allowed_cmp_sg = set(
+                asfim_cls_map.loc[asfim_cls_map["Classification"] == cmp_class, "SG"]
+                .dropna()
+                .unique()
+                .tolist()
+            )
+            flow_daily = flow_daily[flow_daily["SG"].isin(allowed_cmp_sg)]
+    else:
+        cmp_classes = sorted(tidy_all["Bloc"].dropna().unique().tolist())
+        cmp_class = st.selectbox("Type de fonds (comparaison)", ["TOUS"] + cmp_classes, index=0)
+        if cmp_class != "TOUS":
+            allowed_cmp_sg = set(
+                tidy_all.loc[tidy_all["Bloc"] == cmp_class, "SG"]
+                .dropna()
+                .unique()
+                .tolist()
+            )
+            flow_daily = flow_daily[flow_daily["SG"].isin(allowed_cmp_sg)]
+
+    if flow_daily.empty or flow_daily["SG"].nunique() < 2:
+        st.info("Pas assez de SG dans ce type de fonds pour comparer BMCE à un concurrent.")
+        st.stop()
+
+    market_dates = sorted(flow_daily["Date_dt"].dropna().unique().tolist())
+    market_abs = (
+        flow_daily.groupby("Date_dt")["SR"]
+        .sum(min_count=1)
+        .reindex(market_dates, fill_value=0.0)
+        .abs()
+    )
+
+    sg_pool = sorted(flow_daily["SG"].dropna().unique().tolist())
+    bmce_default = pick_bmce_sg(sg_pool) or sg_pool[0]
+
+    c_cmp1, c_cmp2 = st.columns(2)
+    with c_cmp1:
+        bmce_sg = st.selectbox(
+            "Entité BMCE (base flux)",
+            sg_pool,
+            index=sg_pool.index(bmce_default) if bmce_default in sg_pool else 0,
+        )
+    peer_options = [sg for sg in sg_pool if sg != bmce_sg]
+    peer_default = peer_options[0]
+    if peer_options:
+        peer_rank = (
+            flow_daily[flow_daily["SG"].isin(peer_options)]
+            .groupby("SG", as_index=False)["SR"]
+            .sum(min_count=1)
+        )
+        if not peer_rank.empty:
+            peer_rank["abs_flow"] = peer_rank["SR"].abs()
+            peer_default = peer_rank.sort_values("abs_flow", ascending=False)["SG"].iloc[0]
+    with c_cmp2:
+        peer_sg = st.selectbox(
+            "Concurrent",
+            peer_options,
+            index=peer_options.index(peer_default) if peer_default in peer_options else 0,
+        )
+
+    bmce_ts = flow_series_on_market_days(flow_daily, bmce_sg, market_dates)
+    peer_ts = flow_series_on_market_days(flow_daily, peer_sg, market_dates)
+    bmce_kpi = compute_flow_kpis(bmce_ts, market_abs)
+    peer_kpi = compute_flow_kpis(peer_ts, market_abs)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Écart de flux net YTD", fmt_money(bmce_kpi["ytd_net_flow"] - peer_kpi["ytd_net_flow"]))
+    m2.metric("Écart de flux net MTD", fmt_money(bmce_kpi["mtd_net_flow"] - peer_kpi["mtd_net_flow"]))
+    m3.metric("Écart de taux de jours positifs", fmt_pct(bmce_kpi["positive_day_ratio"] - peer_kpi["positive_day_ratio"]))
+    m4.metric("Écart de risque (volatilité)", fmt_money(peer_kpi["flow_volatility"] - bmce_kpi["flow_volatility"]))
+
+    cmp_rows = [
+        {
+            "Indicateur": "Flux net YTD",
+            "BMCE": fmt_money(bmce_kpi["ytd_net_flow"]),
+            "Concurrent": fmt_money(peer_kpi["ytd_net_flow"]),
+            "Écart (BMCE - Concurrent)": fmt_money(bmce_kpi["ytd_net_flow"] - peer_kpi["ytd_net_flow"]),
+        },
+        {
+            "Indicateur": "Flux net MTD",
+            "BMCE": fmt_money(bmce_kpi["mtd_net_flow"]),
+            "Concurrent": fmt_money(peer_kpi["mtd_net_flow"]),
+            "Écart (BMCE - Concurrent)": fmt_money(bmce_kpi["mtd_net_flow"] - peer_kpi["mtd_net_flow"]),
+        },
+        {
+            "Indicateur": "Flux net 5 derniers jours",
+            "BMCE": fmt_money(bmce_kpi["last_5d_net_flow"]),
+            "Concurrent": fmt_money(peer_kpi["last_5d_net_flow"]),
+            "Écart (BMCE - Concurrent)": fmt_money(bmce_kpi["last_5d_net_flow"] - peer_kpi["last_5d_net_flow"]),
+        },
+        {
+            "Indicateur": "Taux de jours positifs",
+            "BMCE": fmt_pct(bmce_kpi["positive_day_ratio"]),
+            "Concurrent": fmt_pct(peer_kpi["positive_day_ratio"]),
+            "Écart (BMCE - Concurrent)": fmt_pct(bmce_kpi["positive_day_ratio"] - peer_kpi["positive_day_ratio"]),
+        },
+        {
+            "Indicateur": "Volatilité des flux (quotidienne)",
+            "BMCE": fmt_money(bmce_kpi["flow_volatility"]),
+            "Concurrent": fmt_money(peer_kpi["flow_volatility"]),
+            "Écart (BMCE - Concurrent)": fmt_money(bmce_kpi["flow_volatility"] - peer_kpi["flow_volatility"]),
+        },
+        {
+            "Indicateur": "Baisse maximale (flux cumulés)",
+            "BMCE": fmt_money(bmce_kpi["max_drawdown"]),
+            "Concurrent": fmt_money(peer_kpi["max_drawdown"]),
+            "Écart (BMCE - Concurrent)": fmt_money(bmce_kpi["max_drawdown"] - peer_kpi["max_drawdown"]),
+        },
+        {
+            "Indicateur": "Momentum 5j vs 5j précédents",
+            "BMCE": fmt_money(bmce_kpi["momentum_5d_vs_prev5d"]),
+            "Concurrent": fmt_money(peer_kpi["momentum_5d_vs_prev5d"]),
+            "Écart (BMCE - Concurrent)": fmt_money(bmce_kpi["momentum_5d_vs_prev5d"] - peer_kpi["momentum_5d_vs_prev5d"]),
+        },
+        {
+            "Indicateur": "Part du flux absolu marché",
+            "BMCE": fmt_pct(bmce_kpi["abs_market_share"]),
+            "Concurrent": fmt_pct(peer_kpi["abs_market_share"]),
+            "Écart (BMCE - Concurrent)": fmt_pct(bmce_kpi["abs_market_share"] - peer_kpi["abs_market_share"]),
+        },
+    ]
+    st.markdown(
+        html_table(pd.DataFrame(cmp_rows), ["Indicateur", "BMCE", "Concurrent", "Écart (BMCE - Concurrent)"], max_h=380),
+        unsafe_allow_html=True,
+    )
+
+    cmp_curve = pd.concat(
+        [
+            bmce_ts.assign(SG=bmce_sg, Cumulative_SR=bmce_ts["SR"].cumsum()),
+            peer_ts.assign(SG=peer_sg, Cumulative_SR=peer_ts["SR"].cumsum()),
+        ],
+        ignore_index=True,
+    )
+    st.altair_chart(
+        line_chart(
+            cmp_curve,
+            "Date_dt",
+            "Cumulative_SR",
+            color="SG",
+            title=f"Flux net cumulé : BMCE vs Concurrent ({cmp_class})",
+        ),
+        use_container_width=True,
+    )
 
 if show_audit:
     st.markdown("---")
