@@ -1,5 +1,6 @@
 import re
 import io
+import json
 import requests
 from pathlib import Path
 from datetime import date
@@ -11,7 +12,7 @@ import streamlit.components.v1 as components
 import altair as alt
 
 # ── Groq API (LLaMA 3.3 70B) ──
-GROQ_API_KEY = "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"
+GROQ_API_KEY = "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"
 
 def call_gemini(prompt: str) -> str:
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -23,7 +24,7 @@ def call_gemini(prompt: str) -> str:
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.7,
-        "max_tokens": 1500,
+        "max_tokens": 400,
     }
     try:
         r = requests.post(url, headers=headers, json=payload, timeout=60)
@@ -49,8 +50,9 @@ ACCENT2    = "#960014"
 GREEN      = "#1A7A4A"
 RED        = "#C0001A"
 CHART_GRID = "#F0F0F0"
-PALETTE    = ["#C0001A", "#1A7A4A", "#1C52C8", "#B8870A", "#6D28D9",
-              "#0891B2", "#D97706", "#065F46", "#7C3AED", "#0B7A50"]
+PALETTE    = ["#C0001A", "#1C52C8", "#F59E0B", "#10B981", "#8B5CF6",
+              "#EC4899", "#06B6D4", "#84CC16", "#F97316", "#6366F1",
+              "#14B8A6", "#EF4444", "#A855F7", "#22C55E", "#EAB308"]
 
 _T = dict(P=PRIMARY, S=SECONDARY, M=MUTED, B=BG, SF=SURFACE,
           BD=BORDER, AC=ACCENT, AC2=ACCENT2, GR=GREEN, RD=RED)
@@ -58,6 +60,17 @@ _T = dict(P=PRIMARY, S=SECONDARY, M=MUTED, B=BG, SF=SURFACE,
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+/* ── Masquer entièrement la sidebar ── */
+section[data-testid="stSidebar"],
+section[data-testid="stSidebar"] + div button[data-testid="stSidebarCollapsedControl"],
+button[data-testid="stSidebarCollapsedControl"],
+[data-testid="collapsedControl"] {
+  display: none !important;
+  width: 0 !important;
+}
+.stApp > div:first-child { margin-left: 0 !important; }
+.block-container { max-width: 1280px !important; padding-left: 2rem !important; }
 
 /* ── Override variables CSS Streamlit (file uploader les utilise en interne) ── */
 :root {
@@ -510,6 +523,283 @@ def apply_weekly_bridge_fix(tidy, eps=1e-9):
     out.loc[mask, "SR"] = 0.0
     return out
 
+# ──────────────────────────────────────────────
+# TABLEAU DE PERFORMANCES PDF — PARSER & CACHE
+# ──────────────────────────────────────────────
+_PERF_CACHE_PATH    = Path(__file__).parent / ".bmce_cache" / "perf_history.json"
+_ASFIM_SR_CACHE_PATH = Path(__file__).parent / ".bmce_cache" / "asfim_sr_cache.json"
+
+_MOIS_FR = {
+    "janvier": 1, "février": 2, "fevrier": 2, "mars": 3, "avril": 4,
+    "mai": 5, "juin": 6, "juillet": 7, "août": 8, "aout": 8,
+    "septembre": 9, "octobre": 10, "novembre": 11, "décembre": 12, "decembre": 12,
+}
+
+_CLS_NORM_PERF = {
+    "MONÉTAIRE": "MONETAIRE", "MONETAIRE": "MONETAIRE",
+    "DIVERSIFIÉ": "DIVERSIFIE", "DIVERSIFIE": "DIVERSIFIE", "DIVERSIFIES": "DIVERSIFIE",
+    "CONTRACTUEL": "CONTRACTUEL", "ACTIONS": "ACTIONS", "OMLT": "OMLT", "OCT": "OCT",
+}
+
+def extract_date_from_perf_filename(filename_or_sheetname):
+    """Extract DD/MM from sheet name '22-04-2026' or filename 'Tableau de performance du 22 avril 2026.xlsx'."""
+    s = str(filename_or_sheetname).strip()
+    # Format feuille Excel : DD-MM-YYYY
+    m = re.search(r"(\d{2})-(\d{2})-(\d{4})", s)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    # Format nom de fichier : "22 avril 2026"
+    m = re.search(r"(\d{1,2})\s+(\w+)\s+(\d{4})", s.lower())
+    if m:
+        month = _MOIS_FR.get(m.group(2))
+        if month:
+            return f"{int(m.group(1)):02d}/{month:02d}"
+    return None
+
+def parse_tableau_performances_excel(xlsx_bytes):
+    """Parse ASFIM Tableau de performances Excel file.
+    Structure : 1 feuille nommée 'DD-MM-YYYY', header en ligne 1,
+    colonnes : OPCVM, Société de Gestion, Classification, AN, VL, YTD, 1 jour, 1 semaine, ...
+    Returns (DataFrame [OPCVM, SG, Classification, AN, VL, return_1j, return_1s, YTD_perf], date_str).
+    """
+    try:
+        xls = pd.ExcelFile(io.BytesIO(xlsx_bytes), engine="openpyxl")
+        sheet_name = xls.sheet_names[0]
+        df = pd.read_excel(io.BytesIO(xlsx_bytes), sheet_name=sheet_name, header=1, engine="openpyxl")
+    except Exception:
+        return pd.DataFrame(), None
+
+    # Date depuis le nom de la feuille (fallback: dernière date détectée dans les colonnes)
+    date_str = extract_date_from_perf_filename(sheet_name)
+
+    if df.empty:
+        return pd.DataFrame(), date_str
+
+    # Mapping des colonnes
+    rename = {
+        "OPCVM": "OPCVM",
+        "Société de Gestion": "SG",
+        "Classification": "Classification",
+        "AN": "AN",
+        "VL": "VL",
+        "YTD": "YTD_perf",
+        "1 jour": "return_1j",
+        "1 semaine": "return_1s",
+        "1 mois": "return_1m",
+    }
+    df = df.rename(columns={c: rename[c] for c in df.columns if c in rename})
+
+    required = ["OPCVM", "SG", "Classification", "AN", "VL", "return_1j"]
+    if not all(c in df.columns for c in required):
+        return pd.DataFrame(), date_str
+
+    keep = [c for c in ["OPCVM", "SG", "Classification", "AN", "VL",
+                         "return_1j", "return_1s", "YTD_perf", "return_1m"] if c in df.columns]
+    df = df[keep].copy()
+
+    # Nettoyage
+    df["OPCVM"] = df["OPCVM"].astype(str).str.strip()
+    df["SG"]    = df["SG"].astype(str).str.strip()
+    df["Classification"] = (
+        df["Classification"].astype(str).str.strip()
+        .map(lambda x: _CLS_NORM_PERF.get(x, x))
+    )
+    for col in ["AN", "VL", "return_1j", "return_1s", "YTD_perf", "return_1m"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df[df["OPCVM"].notna() & df["OPCVM"].ne("nan") & df["OPCVM"].ne("") & df["AN"].notna()]
+
+    if not date_str:
+        _date_candidates = []
+        for c in df.columns:
+            d = norm_ddmm(c)
+            if d:
+                _date_candidates.append(d)
+        if _date_candidates:
+            date_str = sorted(set(_date_candidates), key=mmdd_sort)[-1]
+
+    return df.reset_index(drop=True), date_str
+
+
+def save_perf_snapshot(perf_df, date_str, overwrite=True):
+    """Persist AN+VL+return_1j per OPCVM for a given date into JSON cache.
+    If overwrite=False, skip funds that already have a snapshot for this date.
+    """
+    if perf_df.empty or not date_str:
+        return
+    history = {}
+    if _PERF_CACHE_PATH.exists():
+        try:
+            history = json.loads(_PERF_CACHE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            history = {}
+
+    for _, row in perf_df.iterrows():
+        opcvm = row["OPCVM"]
+        if opcvm not in history:
+            history[opcvm] = {"meta": {}, "snapshots": {}}
+        history[opcvm]["meta"] = {
+            "SG": str(row.get("SG", "")),
+            "Classification": str(row.get("Classification", "")),
+        }
+        if not overwrite and date_str in history[opcvm]["snapshots"]:
+            continue
+        an_v   = float(row["AN"])       if pd.notna(row.get("AN"))       else None
+        vl_v   = float(row["VL"])       if pd.notna(row.get("VL"))       else None
+        r1j_v  = float(row["return_1j"]) if pd.notna(row.get("return_1j")) else None
+        history[opcvm]["snapshots"][date_str] = {"AN": an_v, "VL": vl_v, "return_1j": r1j_v}
+
+    _PERF_CACHE_PATH.write_text(
+        json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def load_perf_history():
+    """Load persisted AN/VL history. Returns dict or {}."""
+    if not _PERF_CACHE_PATH.exists():
+        return {}
+    try:
+        return json.loads(_PERF_CACHE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def compute_sr_from_perf_history(history):
+    """Compute weekly S&R from AN history: S&R_t = AN_t − AN_{t−1} × (VL_t / VL_{t−1}).
+    Returns DataFrame equivalent to asfim_sr: [OPCVM, SG, Classification, Date, SR, AN, YTD].
+    """
+    if not history:
+        return pd.DataFrame(columns=["OPCVM", "SG", "Classification", "Date", "SR", "AN", "YTD"])
+
+    rows = []
+    for opcvm, data in history.items():
+        meta = data.get("meta", {})
+        sg  = meta.get("SG", "")
+        cls = meta.get("Classification", "")
+        snaps = data.get("snapshots", {})
+        sorted_dates = sorted(snaps.keys(), key=mmdd_sort)
+        cumul_ytd = 0.0
+
+        for i, d in enumerate(sorted_dates):
+            snap = snaps[d]
+            an_curr = snap.get("AN")
+            vl_curr = snap.get("VL")
+
+            if i == 0 or an_curr is None:
+                sr = np.nan
+            else:
+                d_prev  = sorted_dates[i - 1]
+                an_prev = snaps[d_prev].get("AN")
+                vl_prev = snaps[d_prev].get("VL")
+                r_1j    = snap.get("return_1j")
+                r_1s    = snap.get("return_1s")
+
+                # Calculer l'écart en jours entre les deux snapshots
+                _year = date.today().year
+                try:
+                    _dd, _mm = d.split("/")
+                    _dd_p, _mm_p = d_prev.split("/")
+                    _dt_curr = date(_year, int(_mm), int(_dd))
+                    _dt_prev = date(_year, int(_mm_p), int(_dd_p))
+                    _gap = (_dt_curr - _dt_prev).days
+                except Exception:
+                    _gap = 1
+
+                if an_prev is None:
+                    sr = np.nan
+                elif vl_prev and vl_curr and vl_prev > 0:
+                    # Cas idéal : deux VL disponibles → ratio exact
+                    sr = an_curr - an_prev * (vl_curr / vl_prev)
+                elif _gap >= 5 and r_1s is not None:
+                    # Écart hebdomadaire (5+ jours) : utiliser return_1s
+                    # return_1s ≈ VL(D)/VL(D-7) → bien adapté pour une semaine
+                    sr = an_curr - an_prev * (1 + r_1s)
+                elif r_1j is not None:
+                    # Écart journalier : utiliser return_1j
+                    sr = an_curr - an_prev * (1 + r_1j)
+                else:
+                    sr = an_curr - an_prev  # fallback brut
+
+            if pd.notna(sr):
+                cumul_ytd += sr
+
+            rows.append({
+                "OPCVM": opcvm, "SG": sg, "Classification": cls, "Date": d,
+                "SR": sr, "AN": an_curr if an_curr is not None else np.nan,
+                "YTD": cumul_ytd,
+            })
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    ytd_map = df.groupby("OPCVM")["YTD"].last()
+    df["YTD"] = df["OPCVM"].map(ytd_map)
+    return df
+
+
+def save_asfim_sr_cache(df):
+    """Persist the full asfim_sr DataFrame to JSON cache."""
+    if df.empty:
+        return
+    try:
+        _ASFIM_SR_CACHE_PATH.write_text(
+            df.to_json(orient="records", force_ascii=False, default_handler=str),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def load_asfim_sr_cache():
+    """Load the persisted asfim_sr DataFrame from JSON cache."""
+    if not _ASFIM_SR_CACHE_PATH.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_json(_ASFIM_SR_CACHE_PATH, orient="records")
+        for col in ("SR", "AN", "YTD"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def extract_an_from_asfim(asfim_sr_df):
+    """Extract the last available AN per fund from the loaded asfim_sr DataFrame.
+    Used to seed the perf cache so the first PDF upload can compute S&R immediately.
+    Returns DataFrame [OPCVM, SG, Classification, AN, VL, return_1j, Date].
+    """
+    if asfim_sr_df.empty or "AN" not in asfim_sr_df.columns:
+        return pd.DataFrame()
+    df = asfim_sr_df[asfim_sr_df["AN"].notna()].copy()
+    if df.empty:
+        return pd.DataFrame()
+    df["_sort"] = df["Date"].apply(mmdd_sort)
+    df = df.sort_values("_sort")
+    # Last AN per fund
+    last = df.groupby("OPCVM", as_index=False).last()
+    seed = last[["OPCVM", "SG", "Classification", "Date", "AN"]].copy()
+    seed["VL"] = np.nan
+    seed["return_1j"] = np.nan
+    return seed
+
+
+def build_tidy_from_asfim_sr(asfim_df):
+    """Build tidy-equivalent DataFrame from per-fund asfim_sr."""
+    if asfim_df.empty:
+        return pd.DataFrame(columns=["Bloc", "Fonds", "SG", "Date", "SR", "YTD_row"])
+    df = asfim_df.copy()
+    df = df[df["SR"].notna()]
+    agg = (
+        df.groupby(["SG", "Classification", "Date"], as_index=False)
+        .agg(SR=("SR", "sum"), YTD_row=("YTD", "sum"))
+        .rename(columns={"Classification": "Bloc"})
+    )
+    agg["Fonds"] = None
+    return agg
+
+
 def read_tcd_daily_totals(xlsx_bytes):
     """Read daily totals directly from pivot-table sheet (Grand Total row)."""
     try:
@@ -639,7 +929,13 @@ def read_tcd_sg_daily(xlsx_bytes):
     return out
 
 def read_asfim_sr(xlsx_bytes):
-    """Read per-fund (OPCVM) S&R data from ASFIM sheet."""
+    """Read per-fund (OPCVM) S&R data from ASFIM sheet.
+
+    Priority: if a S&R JJ/MM column exists for a date, read it directly.
+    Fallback: recalculate from consecutive AN/VL — SR_t = AN_t - AN_{t-1} * (VL_t / VL_{t-1}).
+    This correctly handles both daily files (recalc) and weekly files where
+    the precomputed S&R column already accounts for the right reference date.
+    """
     try:
         df = pd.read_excel(io.BytesIO(xlsx_bytes), sheet_name="ASFIM", header=1, engine="openpyxl")
     except Exception:
@@ -653,10 +949,49 @@ def read_asfim_sr(xlsx_bytes):
     if opcvm_col is None or sg_col is None:
         return pd.DataFrame(columns=["OPCVM", "SG", "Classification", "Date", "SR"])
 
-    # S&R columns: those whose name starts with "S&R" and contain a date
-    sr_cols = [c for c in df.columns if str(c).strip().lower().startswith("s&r") and norm_ddmm(str(c))]
+    # Colonnes S&R directes (priorité)
+    sr_by_date = {}
+    for c in df.columns:
+        cs = str(c).strip().lower()
+        if cs.startswith("s&r") and norm_ddmm(str(c)):
+            d = norm_ddmm(str(c))
+            if d and d not in sr_by_date:
+                sr_by_date[d] = c
 
-    if not sr_cols:
+    # Colonnes AN et VL (fallback recalcul)
+    an_by_date = {}
+    for c in df.columns:
+        if re.match(r"^(an\b|actif.?net)", str(c).strip().lower()) and norm_ddmm(str(c)):
+            d = norm_ddmm(str(c))
+            if d and d not in an_by_date:
+                an_by_date[d] = c
+
+    vl_by_date = {}
+    for c in df.columns:
+        if re.match(r"^(vl\b|valeur.?liquidative)", str(c).strip().lower()) and norm_ddmm(str(c)):
+            d = norm_ddmm(str(c))
+            if d and d not in vl_by_date:
+                vl_by_date[d] = c
+
+    # Dates avec colonne S&R directe — base de référence
+    sr_dates = sorted(sr_by_date.keys(), key=mmdd_sort)
+    last_sr_sort = mmdd_sort(sr_dates[-1]) if sr_dates else (0, 0)
+
+    # Inclure uniquement les dates AN qui sont :
+    #   (a) couvertes par une colonne S&R directe, OU
+    #   (b) dans un écart ≤ 7 jours calendaires après la dernière date S&R connue
+    #   → exclut les colonnes AN orphelines (ex: 26/12 à 8 mois du dernier S&R)
+    def _within_range(d):
+        s = mmdd_sort(d)
+        # différence en "mois×31 + jours" — suffisant pour détecter les gros écarts
+        delta = (s[0] - last_sr_sort[0]) * 31 + (s[1] - last_sr_sort[1])
+        return delta <= 7
+
+    dates = sorted(
+        [d for d in an_by_date.keys() if d in sr_by_date or _within_range(d)],
+        key=mmdd_sort,
+    )
+    if not dates:
         return pd.DataFrame(columns=["OPCVM", "SG", "Classification", "Date", "SR"])
 
     rows = []
@@ -668,21 +1003,37 @@ def read_asfim_sr(xlsx_bytes):
             continue
         if not sg or sg.lower() in {"nan", "none"}:
             continue
-        for c in sr_cols:
-            date = norm_ddmm(str(c))
-            if date:
-                rows.append({
-                    "OPCVM": opcvm,
-                    "SG": sg,
-                    "Classification": cls,
-                    "Date": date,
-                    "SR": to_float(row[c]),
-                })
+
+        prev_an, prev_vl, has_prev = np.nan, np.nan, False
+
+        for date in dates:
+            an_val = to_float(row[an_by_date[date]]) if date in an_by_date else np.nan
+            vl_val = to_float(row[vl_by_date[date]]) if date in vl_by_date else np.nan
+
+            # Priorité : lire S&R directement si la colonne existe
+            if date in sr_by_date:
+                sr_val = to_float(row[sr_by_date[date]])
+            elif has_prev and pd.notna(an_val) and pd.notna(vl_val) and pd.notna(prev_an) and pd.notna(prev_vl) and abs(prev_vl) > 1e-12:
+                sr_val = an_val - prev_an * (vl_val / prev_vl)
+            else:
+                sr_val = np.nan
+
+            rows.append({
+                "OPCVM": opcvm,
+                "SG": sg,
+                "Classification": cls,
+                "Date": date,
+                "SR": sr_val,
+                "AN": an_val,
+                "VL": vl_val,
+            })
+
+            if pd.notna(an_val) and pd.notna(vl_val) and abs(vl_val) > 1e-12:
+                prev_an, prev_vl, has_prev = an_val, vl_val, True
 
     out = pd.DataFrame(rows)
     if out.empty:
         return out
-    # YTD per fund = sum of all S&R
     ytd = out.groupby(["OPCVM", "SG", "Classification"], as_index=False)["SR"].sum(min_count=1).rename(columns={"SR": "YTD"})
     out = out.merge(ytd, on=["OPCVM", "SG", "Classification"], how="left")
     return out
@@ -1153,18 +1504,141 @@ st.markdown(
 _CACHE_PATH = Path(__file__).parent / ".bmce_cache" / "Analyse_SR.xlsx"
 _CACHE_PATH.parent.mkdir(exist_ok=True)
 
+# ── Bouton mise à jour quotidienne ──
+import subprocess
+_btn_col, _status_col = st.columns([1, 3])
+with _btn_col:
+    _maj_clicked = st.button(
+        "🔄 Mettre à jour les données du jour",
+        use_container_width=True,
+        key="btn_maj_quotidienne",
+    )
+with _status_col:
+    _maj_placeholder = st.empty()
+
+if _maj_clicked:
+    import time as _time
+    _t_start = _time.time()
+    with st.spinner("Mise à jour en cours…"):
+        _maj_ok = True
+        _maj_errors = []
+
+        # Étape 1 : script bash de préparation
+        try:
+            _proc = subprocess.run(
+                ["bash", "/Users/mac/.n8n-files/prepare_daily.sh"],
+                capture_output=True, text=True, timeout=120
+            )
+            if _proc.returncode != 0:
+                _maj_errors.append(f"Script : {_proc.stderr.strip() or 'erreur inconnue'}")
+                _maj_ok = False
+        except Exception as _e:
+            _maj_errors.append(f"Script : {_e}")
+            _maj_ok = False
+
+        # Étape 2 : webhook n8n
+        if _maj_ok:
+            try:
+                _r = requests.get(
+                    "http://localhost:5678/webhook/6f36323d-ac88-412c-8337-3065e273d6ba",
+                    timeout=60
+                )
+                if _r.status_code >= 400:
+                    _maj_errors.append(f"Webhook : HTTP {_r.status_code}")
+                    _maj_ok = False
+            except Exception as _e:
+                _maj_errors.append(f"Webhook : {_e}")
+                _maj_ok = False
+
+    if _maj_ok:
+        # Attendre que n8n ait fini d'écrire le fichier (max 30s)
+        import time as _time
+        _maj_placeholder.info("⏳ Finalisation…")
+        for _i in range(30):
+            if _CACHE_PATH.exists() and _CACHE_PATH.stat().st_mtime > _t_start:
+                break
+            _time.sleep(1)
+        _maj_placeholder.success("✅ Données mises à jour !")
+        st.rerun()
+    else:
+        _maj_placeholder.error("❌ " + " | ".join(_maj_errors))
+
 with st.sidebar:
     st.markdown(f"<div style='font-weight:700;color:{PRIMARY};font-size:1rem;'>Paramètres</div>", unsafe_allow_html=True)
     st.markdown("---")
-    up = st.file_uploader("Uploader Analyse_SR.xlsx", type=["xlsx"])
+
+    # ── Analyse SR Excel (optionnel si historique AN disponible) ──
+    up = st.file_uploader("Analyse_SR.xlsx (optionnel)", type=["xlsx"])
     if up is not None:
         _CACHE_PATH.write_bytes(up.getvalue())
     if _CACHE_PATH.exists():
         _cache_mtime = date.fromtimestamp(_CACHE_PATH.stat().st_mtime)
-        st.caption(f"Fichier en mémoire : {_cache_mtime.strftime('%d/%m/%Y')}")
-        if st.button("🗑 Effacer le fichier sauvegardé", key="clear_cache"):
+        st.caption(f"Excel en mémoire : {_cache_mtime.strftime('%d/%m/%Y')}")
+        if st.button("🗑 Effacer l'Excel sauvegardé", key="clear_cache"):
             _CACHE_PATH.unlink(missing_ok=True)
             st.rerun()
+
+    st.markdown("---")
+
+    # ── Tableau de performances ASFIM (PDF) ──
+    st.markdown(
+        f"<div style='font-weight:600;color:{PRIMARY};font-size:0.85rem;margin-bottom:6px;'>"
+        f"📄 Tableau de performances ASFIM</div>",
+        unsafe_allow_html=True,
+    )
+    up_perf = st.file_uploader("Uploader le Tableau de performances (.xlsx)", type=["xlsx"], key="perf_xlsx")
+    if up_perf is not None:
+        with st.spinner("Lecture du fichier…"):
+            _perf_df_new, _perf_date_auto = parse_tableau_performances_excel(up_perf.getvalue())
+        if _perf_df_new.empty:
+            st.error("Fichier non reconnu — vérifiez le format.")
+        else:
+            _perf_date_input = st.text_input(
+                "Date (JJ/MM)", value=_perf_date_auto or "", key="perf_date_input",
+                help="Détectée automatiquement depuis le nom de la feuille (ex: 22-04-2026 → 22/04)"
+            )
+            if st.button("💾 Enregistrer ce snapshot", key="save_perf"):
+                d_ok = norm_ddmm(_perf_date_input) if _perf_date_input else None
+                if d_ok:
+                    save_perf_snapshot(_perf_df_new, d_ok)
+                    st.success(f"✓ {len(_perf_df_new)} fonds enregistrés pour le {d_ok}")
+                    st.rerun()
+                else:
+                    st.error("Date invalide — format attendu : JJ/MM")
+
+    # Statut du cache AN (perf_history)
+    _perf_hist_sidebar = load_perf_history()
+    _perf_dates_sidebar = sorted(
+        set(d for v in _perf_hist_sidebar.values() for d in v.get("snapshots", {}).keys()),
+        key=mmdd_sort,
+    ) if _perf_hist_sidebar else []
+    if _perf_dates_sidebar:
+        st.caption(
+            f"📦 AN mémorisés : {', '.join(_perf_dates_sidebar[-4:])}"
+            + (" …" if len(_perf_dates_sidebar) > 4 else "")
+        )
+
+    # Statut du cache asfim_sr
+    if _ASFIM_SR_CACHE_PATH.exists():
+        try:
+            _sr_cache_dates = sorted(
+                pd.read_json(_ASFIM_SR_CACHE_PATH, orient="records")["Date"].dropna().unique().tolist(),
+                key=mmdd_sort,
+            )
+            st.caption(
+                f"📊 S&R en cache : {len(_sr_cache_dates)} dates · "
+                f"jusqu'au {_sr_cache_dates[-1] if _sr_cache_dates else '—'}"
+            )
+        except Exception:
+            pass
+
+    st.markdown("---")
+    # Bouton reset complet
+    if st.button("🗑 Réinitialiser tout le cache", key="clear_all"):
+        for _p in [_CACHE_PATH, _PERF_CACHE_PATH, _ASFIM_SR_CACHE_PATH]:
+            _p.unlink(missing_ok=True)
+        st.rerun()
+
     st.markdown("---")
     show_audit = st.checkbox("Afficher le fichier en entier", value=False)
 
@@ -1276,71 +1750,193 @@ components.html(f"""
 </script>
 """, height=0)
 
-if up is None and not _CACHE_PATH.exists():
+# ── Disponibilité des sources de données ──
+_perf_history       = load_perf_history()
+_perf_dates_all     = sorted(
+    set(d for v in _perf_history.values() for d in v.get("snapshots", {}).keys()),
+    key=mmdd_sort,
+) if _perf_history else []
+_perf_has_new       = len(_perf_dates_all) >= 2   # assez pour calculer un S&R
+_xlsx_available     = up is not None or _CACHE_PATH.exists()
+_asfim_cache_avail  = _ASFIM_SR_CACHE_PATH.exists()
+
+# Premier lancement : aucune source disponible
+if not _xlsx_available and not _asfim_cache_avail:
     st.markdown(
         f'<div style="margin:40px auto;max-width:480px;text-align:center;padding:48px 32px;'
         f'border:1px solid {BORDER};border-radius:8px;background:{SURFACE};">'
-        f'<div style="font-size:2rem;margin-bottom:16px;">📂</div>'
-        f'<div style="font-size:1rem;font-weight:700;color:{PRIMARY};margin-bottom:8px;">Importez votre fichier Excel</div>'
-        f'<div style="font-size:.85rem;color:{MUTED};">Glissez <strong>Analyse_SR.xlsx</strong> dans le panneau latéral pour afficher le dashboard.</div>'
-        f'</div>',
+        f'<div style="font-size:2.5rem;margin-bottom:16px;">🔄</div>'
+        f'<div style="font-size:1.1rem;font-weight:700;color:{PRIMARY};margin-bottom:12px;">Aucune donnée disponible</div>'
+        f'<div style="font-size:.9rem;color:{MUTED};line-height:1.8;">'
+        f'Cliquez le bouton <strong>🔄 Mettre à jour les données du jour</strong><br>'
+        f'en haut de page pour charger automatiquement les données.'
+        f'</div></div>',
         unsafe_allow_html=True,
     )
     st.stop()
 
-xlsx_bytes = up.getvalue() if up is not None else _CACHE_PATH.read_bytes()
-xls = pd.ExcelFile(io.BytesIO(xlsx_bytes), engine="openpyxl")
-tcd_totals = read_tcd_daily_totals(xlsx_bytes)
-tcd_sg_daily = read_tcd_sg_daily(xlsx_bytes)
-asfim_cls_map = read_asfim_sg_classification(xlsx_bytes)
-asfim_sr = read_asfim_sr(xlsx_bytes)
+YEAR = date.today().year
 
-if not asfim_cls_map.empty:
-    class_options = sorted(asfim_cls_map["Classification"].dropna().unique().tolist())
-    class_filter = class_options  # toutes les classifications actives par défaut
-    allowed_sg_sidebar = set(
-        asfim_cls_map["SG"].dropna().unique().tolist()
-    )
-else:
-    class_options = ["ACTIONS", "DIVERSIFIES", "OMLT"]
-    class_filter = class_options
-    allowed_sg_sidebar = None
+# ── Étape 1 : charger les données de base ──
+if _xlsx_available:
+    # Source principale : Analyse SR Excel
+    xlsx_bytes = up.getvalue() if up is not None else _CACHE_PATH.read_bytes()
+    xls           = pd.ExcelFile(io.BytesIO(xlsx_bytes), engine="openpyxl")
+    tcd_totals    = read_tcd_daily_totals(xlsx_bytes)
+    tcd_sg_daily  = read_tcd_sg_daily(xlsx_bytes)
+    asfim_cls_map = read_asfim_sg_classification(xlsx_bytes)
+    asfim_sr      = read_asfim_sr(xlsx_bytes)
 
-recap_name = None
-for sh in xls.sheet_names:
-    low = sh.lower()
-    if "recap" in low and ("s&r" in low or "sr" in low):
-        recap_name = sh
-        break
-if recap_name is None:
+    recap_name = None
     for sh in xls.sheet_names:
-        if "recap" in sh.lower():
+        low = sh.lower()
+        if "recap" in low and ("s&r" in low or "sr" in low):
             recap_name = sh
             break
-if recap_name is None:
-    st.error("Feuille 'Recap S&R' introuvable.")
-    st.stop()
+    if recap_name is None:
+        for sh in xls.sheet_names:
+            if "recap" in sh.lower():
+                recap_name = sh
+                break
+    if recap_name is None:
+        st.error("Feuille 'Recap S&R' introuvable.")
+        st.stop()
 
-df_recap = read_recap(xlsx_bytes, recap_name)
-tidy = parse_recap_sr(df_recap)
-tidy = apply_weekly_bridge_fix(tidy)
-all_opcvm_ytd = parse_all_opcvm_ytd(df_recap)  # {SG: total_YTD} from aggregate section
+    df_recap      = read_recap(xlsx_bytes, recap_name)
+    tidy          = parse_recap_sr(df_recap)
+    tidy          = apply_weekly_bridge_fix(tidy)
+    all_opcvm_ytd = parse_all_opcvm_ytd(df_recap)
 
+    # Auto-seed perf_history avec AN de la dernière date de l'ASFIM sheet
+    _seed_df = extract_an_from_asfim(asfim_sr)
+    if not _seed_df.empty:
+        for _sd in _seed_df["Date"].dropna().unique():
+            _sd_norm = norm_ddmm(_sd)
+            if _sd_norm:
+                save_perf_snapshot(
+                    _seed_df[_seed_df["Date"] == _sd].copy(),
+                    _sd_norm,
+                    overwrite=False,
+                )
+
+    # Persister asfim_sr complet pour les prochaines sessions sans Excel
+    save_asfim_sr_cache(asfim_sr)
+
+else:
+    # Source : cache persisté depuis le dernier chargement Excel
+    asfim_sr      = load_asfim_sr_cache()
+    tcd_sg_daily  = pd.DataFrame(columns=["SG", "Date", "SR"])
+    if not asfim_sr.empty:
+        tidy          = build_tidy_from_asfim_sr(asfim_sr[asfim_sr["SR"].notna()])
+        tcd_totals    = asfim_sr[asfim_sr["SR"].notna()].groupby("Date")["SR"].sum().to_dict()
+        asfim_cls_map = asfim_sr[["SG", "Classification"]].drop_duplicates().reset_index(drop=True)
+        all_opcvm_ytd = asfim_sr.groupby("SG")["YTD"].max().to_dict()
+    else:
+        tidy          = pd.DataFrame(columns=["Bloc", "Fonds", "SG", "Date", "SR", "YTD_row"])
+        tcd_totals    = {}
+        asfim_cls_map = pd.DataFrame(columns=["SG", "Classification"])
+        all_opcvm_ytd = {}
+
+    # Bannière source cache
+    _cache_dates = sorted(asfim_sr["Date"].dropna().unique().tolist(), key=mmdd_sort) if not asfim_sr.empty else []
+    st.markdown(
+        f'<div style="background:{SURFACE};border:1px solid {BORDER};border-left:4px solid {ACCENT};'
+        f'border-radius:4px;padding:10px 16px;margin-bottom:12px;font-size:0.82rem;color:{SECONDARY};">'
+        f'📦 Données en cache · {len(_cache_dates)} dates · jusqu\'au {_cache_dates[-1] if _cache_dates else "—"}'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+# ── Étape 2 : ajouter les nouvelles dates depuis les PDFs uploadés ──
+if _perf_has_new:
+    _asfim_sr_perf = compute_sr_from_perf_history(_perf_history)
+    _perf_with_sr  = _asfim_sr_perf[_asfim_sr_perf["SR"].notna()] if not _asfim_sr_perf.empty else pd.DataFrame()
+
+    if not _perf_with_sr.empty:
+        _perf_dates_set = set(_perf_with_sr["Date"].dropna().unique())
+        _existing_dates = set(asfim_sr["Date"].dropna().unique()) if not asfim_sr.empty else set()
+
+        # Ne jamais écraser une date déjà dans l'Excel — uniquement ajouter les dates nouvelles
+        # Exclure aussi les dates aberrantes (> 30 jours après la dernière date connue)
+        _last_known = max(_existing_dates, key=mmdd_sort) if _existing_dates else None
+        if _last_known:
+            _lk = mmdd_sort(_last_known)
+            def _perf_date_ok(d):
+                s = mmdd_sort(d)
+                delta = (s[0] - _lk[0]) * 31 + (s[1] - _lk[1])
+                return delta <= 30
+            _perf_dates_set = {d for d in _perf_dates_set if _perf_date_ok(d)}
+        _new_dates = _perf_dates_set - _existing_dates
+
+        if _new_dates:
+            _new_rows = _perf_with_sr[_perf_with_sr["Date"].isin(_new_dates)].copy()
+
+            asfim_sr = pd.concat([asfim_sr, _new_rows], ignore_index=True) \
+                       if not asfim_sr.empty else _new_rows
+
+            _tidy_new = build_tidy_from_asfim_sr(_new_rows)
+            tidy = pd.concat([tidy, _tidy_new], ignore_index=True) \
+                   if not tidy.empty else _tidy_new
+
+            for _d in _new_dates:
+                tcd_totals[_d] = _new_rows[_new_rows["Date"] == _d]["SR"].sum()
+
+            save_asfim_sr_cache(asfim_sr)
+
+            st.markdown(
+                f'<div style="background:#F0FFF4;border:1px solid #A7F3D0;border-left:4px solid {GREEN};'
+                f'border-radius:4px;padding:10px 16px;margin-bottom:12px;font-size:0.82rem;color:{PRIMARY};">'
+                f'✓ Nouvelles dates ajoutées depuis le Tableau de performances : '
+                f'{", ".join(sorted(_new_dates, key=mmdd_sort))}</div>',
+                unsafe_allow_html=True,
+            )
 
 if tidy.empty:
     st.error("Impossible d'extraire les données.")
     st.stop()
 
+# ── Remplacer tidy par les données ASFIM pour les dates où elles existent ──
+# Le Recap S&R peut être mal rempli par des outils automatisés (doublons par section).
+# La feuille ASFIM contient les valeurs correctes par fonds → on la préfère.
+if not asfim_sr.empty:
+    _asfim_sr_valid = asfim_sr[asfim_sr["SR"].notna()].copy()
+    if not _asfim_sr_valid.empty:
+        _asfim_dates = set(_asfim_sr_valid["Date"].dropna().unique())
+        # Construire tidy depuis ASFIM pour ces dates
+        _tidy_from_asfim = build_tidy_from_asfim_sr(_asfim_sr_valid)
+        # Garder le tidy du Recap S&R pour les dates que l'ASFIM ne couvre pas
+        _tidy_recap_only = tidy[~tidy["Date"].isin(_asfim_dates)]
+        tidy = pd.concat([_tidy_recap_only, _tidy_from_asfim], ignore_index=True)
+        # Reconstruire tcd_totals pour les dates ASFIM
+        for _d in _asfim_dates:
+            _day_sr = _asfim_sr_valid[_asfim_sr_valid["Date"] == _d]["SR"].sum(skipna=True)
+            tcd_totals[_d] = _day_sr
+
+# Enrichir tidy avec Date_dt
+if "Date_dt" not in tidy.columns:
+    tidy["Date_dt"] = tidy["Date"].apply(lambda s: ddmm_to_dt(s, YEAR))
+
+if not asfim_cls_map.empty:
+    class_options    = sorted(asfim_cls_map["Classification"].dropna().unique().tolist())
+    class_filter     = class_options
+    allowed_sg_sidebar = set(asfim_cls_map["SG"].dropna().unique().tolist())
+else:
+    class_options    = ["ACTIONS", "DIVERSIFIE", "OMLT"]
+    class_filter     = class_options
+    allowed_sg_sidebar = None
+
 # Keep an unfiltered copy for drill-down category filtering.
 tidy_all = tidy.copy()
-
-YEAR = date.today().year
-tidy["Date_dt"] = tidy["Date"].apply(lambda s: ddmm_to_dt(s, YEAR))
+if "Date_dt" not in tidy_all.columns:
+    tidy_all["Date_dt"] = tidy_all["Date"].apply(lambda s: ddmm_to_dt(s, YEAR))
 
 if allowed_sg_sidebar is not None:
     tidy = tidy[tidy["SG"].isin(allowed_sg_sidebar)]
 else:
     tidy = tidy[tidy["Bloc"].isin(class_filter)]
+
+if "Date_dt" not in tidy.columns:
+    tidy["Date_dt"] = tidy["Date"].apply(lambda s: ddmm_to_dt(s, YEAR))
 
 dates = sorted(tidy["Date"].dropna().unique().tolist(), key=mmdd_sort)
 if not dates:
@@ -1375,9 +1971,10 @@ total_sel = tcd_totals.get(date_sel, np.nan)
 if pd.isna(total_sel):
     total_sel = df_rank["SR_sel"].sum(skipna=True)
 
+_ytd_note = "Le YTD provient directement de l'Excel." if _xlsx_available else "Le YTD est calculé par cumul des S&R issus des PDFs uploadés."
 st.markdown(
     f'<div style="background:{SURFACE};border:1px solid {BORDER};border-radius:10px;padding:10px 14px;margin:10px 0 16px 0;font-size:0.86rem;color:{SECONDARY};">'
-    f'<strong style="color:{PRIMARY};">Note :</strong> Le YTD provient directement de l\'Excel.</div>',
+    f'<strong style="color:{PRIMARY};">Note :</strong> {_ytd_note}</div>',
     unsafe_allow_html=True,
 )
 
@@ -1396,8 +1993,8 @@ def _kpi(label, value, color=None):
     return (
         f'<div style="background:#fff;border:1px solid {BORDER};border-top:3px solid {clr};'
         f'border-radius:4px;padding:14px 16px;box-shadow:0 1px 4px rgba(0,0,0,.05);">'
-        f'<div style="font-size:.65rem!important;font-weight:700!important;text-transform:uppercase;letter-spacing:.09em;'
-        f'color:{MUTED}!important;-webkit-text-fill-color:{MUTED}!important;margin-bottom:6px;">{label}</div>'
+        f'<div style="font-size:.65rem!important;font-weight:800!important;text-transform:uppercase;letter-spacing:.09em;'
+        f'color:{PRIMARY}!important;-webkit-text-fill-color:{PRIMARY}!important;margin-bottom:6px;">{label}</div>'
         f'<div style="font-size:1.25rem!important;font-weight:700!important;'
         f'color:{clr}!important;-webkit-text-fill-color:{clr}!important;'
         f'line-height:1.1;word-break:break-word;">{value}</div>'
@@ -1549,13 +2146,62 @@ if not asfim_sr.empty:
             _nb_pos_f = (_fonds_hist["SR"] > 0).sum()
             _nb_neg_f = (_fonds_hist["SR"] < 0).sum()
 
+            # Stats supplémentaires
+            _fonds_median_sr = _fonds_hist["SR"].median()
+            _fonds_std_sr    = _fonds_hist["SR"].std() if len(_fonds_hist) > 1 else 0.0
+            _outlier_mask    = (_fonds_hist["SR"] - _fonds_mean_sr).abs() > _fonds_std_sr if _fonds_std_sr > 0 else pd.Series([False]*len(_fonds_hist))
+            _nb_outliers     = int(_outlier_mask.sum())
+            _outliers_total_sr = _fonds_hist.loc[_outlier_mask, "SR"].sum()
+            _trend_var       = (_trend_second - _trend_first) / abs(_trend_first) if _trend_first and abs(_trend_first) > 1e-9 else np.nan
+            # Tendance 2ème moitié hors outliers
+            _second_half     = _fonds_hist.iloc[_mid:].copy()
+            _second_no_out   = _second_half[~_outlier_mask.iloc[_mid:].values]
+            _trend_second_no_outliers = _second_no_out["SR"].mean() if not _second_no_out.empty else _trend_second
+            # Flux semaines adjacentes au pic
+            _peak_idx = _fonds_hist["SR"].idxmax()
+            _pre_peak_sr  = _fonds_hist.loc[_peak_idx - 1, "SR"] if _peak_idx > 0 else np.nan
+            _post_peak_sr = _fonds_hist.loc[_peak_idx + 1, "SR"] if _peak_idx < len(_fonds_hist) - 1 else np.nan
+            if abs(_trend_first) < 10_000:
+                _trend_var_label = f"{fmt_money(_trend_second - _trend_first)} (variation absolue — base 1ère moitié quasi-nulle)"
+            elif pd.notna(_trend_var):
+                _trend_var_label = f"{fmt_pct(_trend_var)} ({'+' if _trend_second > _trend_first else ''}{fmt_money(_trend_second - _trend_first)})"
+            else:
+                _trend_var_label = "non calculable"
+
             # Comparaison catégorie sur la même période
             _cat_hist = asfim_sr[
                 (asfim_sr["Classification"] == _fonds_cat) &
                 (asfim_sr["Date"].isin(_fonds_hist["Date"]))
             ].groupby("Date")["SR"].sum().reset_index()
-            _cat_mean = _cat_hist["SR"].mean() if not _cat_hist.empty else np.nan
+            _cat_mean  = _cat_hist["SR"].mean() if not _cat_hist.empty else np.nan
             _cat_total = _cat_hist["SR"].sum() if not _cat_hist.empty else np.nan
+
+            # Actif Net du fonds (dernière valeur disponible)
+            _fonds_an = np.nan
+            _cat_an_total = np.nan
+            if "AN" in _bmce_fonds_df.columns:
+                _an_series = _bmce_fonds_df[_bmce_fonds_df["OPCVM"] == _fonds_sel]["AN"].dropna()
+                _fonds_an = _an_series.iloc[-1] if not _an_series.empty else np.nan
+                _cat_an_df = asfim_sr[(asfim_sr["Classification"] == _fonds_cat) & asfim_sr["AN"].notna()]
+                if not _cat_an_df.empty:
+                    _last_an_date = _cat_an_df.sort_values("Date", key=lambda s: s.map(mmdd_sort))["Date"].iloc[-1]
+                    _cat_an_total = _cat_an_df[_cat_an_df["Date"] == _last_an_date].groupby("OPCVM")["AN"].last().sum()
+
+            def _an(v):
+                return fmt_money(v) if pd.notna(v) else "non disponible"
+
+            # Rang du fonds dans sa catégorie à la dernière date
+            _last_date_f = _fonds_hist["Date"].iloc[-1] if not _fonds_hist.empty else None
+            if _last_date_f:
+                _cat_rank_df = (
+                    asfim_sr[(asfim_sr["Classification"] == _fonds_cat) & (asfim_sr["Date"] == _last_date_f)]
+                    .sort_values("SR", ascending=False)
+                    .reset_index(drop=True)
+                )
+                _fonds_rank_idx = _cat_rank_df[_cat_rank_df["OPCVM"] == _fonds_sel].index
+                _fonds_rank = int(_fonds_rank_idx[0] + 1) if len(_fonds_rank_idx) > 0 else None
+            else:
+                _fonds_rank = None
 
             # Historique formaté pour le prompt
             _hist_lines = "\n".join(
@@ -1563,37 +2209,119 @@ if not asfim_sr.empty:
                 for r in _fonds_hist.itertuples()
             )
 
-            _prompt_fonds = f"""Tu es analyste financier senior chez BMCE Capital Gestion, spécialiste en analyse de fonds OPCVM marocains.
+            _an_disponible     = pd.notna(_fonds_an)    and _fonds_an    != 0
+            _cat_an_disponible = pd.notna(_cat_an_total) and _cat_an_total != 0
+            _fonds_an_s    = fmt_money(_fonds_an)    if _an_disponible    else "non disponible"
+            _cat_an_s      = fmt_money(_cat_an_total) if _cat_an_disponible else "non disponible"
+            _rot_moy_s     = fmt_pct(_fonds_mean_sr / _fonds_an)    if _an_disponible else "non disponible"
+            _rot_pic_s     = fmt_pct(_peak_row.SR   / _fonds_an)    if _an_disponible else "non disponible"
+            _rot_ytd_s     = fmt_pct(_fonds_ytd     / _fonds_an)    if _an_disponible else "non disponible"
+            _pdm_enc_s     = fmt_pct(_fonds_an / _cat_an_total)     if _an_disponible and _cat_an_disponible else "non disponible"
+            _pdm_flux_s    = fmt_pct(_fonds_mean_sr / _cat_mean if pd.notna(_cat_mean) and _cat_mean != 0 else 0)
 
-Effectue une analyse approfondie du fonds suivant et tire des déductions concrètes sur sa dynamique.
+            _prompt_fonds = f"""Tu es analyste quantitatif senior spécialisé en fonds OPCVM marocains. Tu dois produire une analyse strictement factuelle, sans hallucination ni remplissage. Chaque affirmation doit être directement étayée par les chiffres fournis.
 
+═══ DONNÉES ═══
 Fonds : {_fonds_sel}
-Société de gestion : BMCE Capital Gestion
-Catégorie : {_fonds_cat}
-Période analysée : {_fonds_hist["Date"].iloc[0] if not _fonds_hist.empty else "—"} → {_fonds_hist["Date"].iloc[-1] if not _fonds_hist.empty else "—"}
+Catégorie ASFIM : {_fonds_cat}
+Période : {_fonds_hist["Date"].iloc[0] if not _fonds_hist.empty else "—"} → {_fonds_hist["Date"].iloc[-1] if not _fonds_hist.empty else "—"}
 
-Données historiques S&R du fonds :
+Flux hebdomadaires de souscriptions/rachats nets (S&R en MAD) — ATTENTION : ce sont des FLUX, pas des cours ni des encours :
 {_hist_lines}
 
-Indicateurs calculés :
-- S&R dernier relevé : {fmt_money(_fonds_last_sr)}
-- Moyenne S&R sur la période : {fmt_money(_fonds_mean_sr)}
-- Total cumulé période : {fmt_money(_fonds_total_sr)}
-- YTD 2026 : {fmt_money(_fonds_ytd)}
-- Semaines en collecte : {_nb_pos_f} | Semaines en décollecte : {_nb_neg_f}
-- Tendance : {_trend_dir} (1ère moitié moy. {fmt_money(_trend_first)} → 2ème moitié moy. {fmt_money(_trend_second)})
-- Pic : {fmt_money(_peak_row.SR) if _peak_row is not None else "—"} le {_peak_row.Date if _peak_row is not None else "—"}
-- Creux : {fmt_money(_trough_row.SR) if _trough_row is not None else "—"} le {_trough_row.Date if _trough_row is not None else "—"}
-- Catégorie {_fonds_cat} — moyenne marché même période : {fmt_money(_cat_mean)} | total marché : {fmt_money(_cat_total)}
+Indicateurs statistiques sur ces flux :
+- Dernier flux S&R : {fmt_money(_fonds_last_sr)}
+- Flux moyen hebdomadaire : {fmt_money(_fonds_mean_sr)}
+- Flux médian hebdomadaire : {fmt_money(_fonds_median_sr)}
+- Écart-type des flux : {fmt_money(_fonds_std_sr)}
+- Coefficient de variation (écart-type/moyenne) : {fmt_pct(_fonds_std_sr / abs(_fonds_mean_sr) if _fonds_mean_sr != 0 else 0)}
+- Flux cumulé sur la période : {fmt_money(_fonds_total_sr)}
+- Flux cumulé des semaines outliers uniquement : {fmt_money(_outliers_total_sr)}
+- Part des outliers dans le flux cumulé total : {fmt_pct(_outliers_total_sr / _fonds_total_sr if _fonds_total_sr != 0 else 0)}
+- YTD 2026 (flux cumulé depuis janvier) : {fmt_money(_fonds_ytd)}
+- Nombre de semaines total : {_nb_pos_f + _nb_neg_f}
+- Semaines en collecte nette positive : {_nb_pos_f} / {_nb_pos_f + _nb_neg_f} ({fmt_pct(_nb_pos_f / (_nb_pos_f + _nb_neg_f) if (_nb_pos_f + _nb_neg_f) > 0 else 0)})
+- Nombre de semaines outliers (écart > 1 écart-type) : {_nb_outliers}
+- Tendance 1ère moitié : {fmt_money(_trend_first)}
+- Tendance 2ème moitié : {fmt_money(_trend_second)}
+- Tendance 2ème moitié hors outliers : {fmt_money(_trend_second_no_outliers)}
+- Variation de tendance : {_trend_var_label}
+- Pic de collecte : {fmt_money(_peak_row.SR)} (semaine du {_peak_row.Date}) — représente {fmt_pct(_peak_row.SR / _fonds_total_sr if _fonds_total_sr != 0 else 0)} du flux cumulé total
+- Flux de la semaine précédant le pic : {fmt_money(_pre_peak_sr)}
+- Flux de la semaine suivant le pic : {fmt_money(_post_peak_sr)}
+- Creux de rachats : {fmt_money(_trough_row.SR)} (semaine du {_trough_row.Date})
+- Ratio creux/pic en valeur absolue : {fmt_pct(abs(_trough_row.SR) / abs(_peak_row.SR) if _peak_row is not None and _peak_row.SR != 0 else 0)}
 
-Rédige une analyse narrative complète en 5 paragraphes :
-1. Description du comportement du fonds sur la période : rythme, amplitude, régularité des flux
-2. Positionnement vs sa catégorie {_fonds_cat} : surperformance, sous-performance, ou alignement avec le marché ?
-3. Analyse de la tendance détectée ({_trend_dir}) : à partir de quand, quelle ampleur, est-ce que ça s'accélère ?
-4. Déductions et hypothèses explicatives : profil probable des investisseurs de ce fonds, facteurs macro (taux BAM, liquidité, appétit au risque), comportements saisonniers possibles, contexte géopolitique 2026
-5. Points de vigilance et recommandations pour les semaines à venir : signaux à surveiller, risques de poursuite ou de retournement
+Encours du fonds (Actif Net au {_fonds_hist["Date"].iloc[-1] if not _fonds_hist.empty else "—"}) :
+- Actif Net (AN) = encours total du fonds : {_fonds_an_s}
+- Ratio flux moyen / encours (rotation hebdomadaire) : {_rot_moy_s}
+- Ratio pic / encours : {_rot_pic_s} — part du pic dans l'encours total
+- Ratio flux cumulé YTD / encours : {_rot_ytd_s}
 
-Style : analyse institutionnelle en français, précise, avec des déductions claires et assumées. Texte narratif continu, sans puces ni titres, sans gras. Intègre naturellement les chiffres dans le texte."""
+Comparaison catégorie {_fonds_cat} (brute, non normalisée par taille) :
+- Flux moyen catégorie : {fmt_money(_cat_mean)}/sem
+- Total catégorie : {fmt_money(_cat_total)}
+- Ratio fonds/catégorie (flux) : {_pdm_flux_s}
+- Actif Net total de la catégorie : {_cat_an_s}
+- Part de marché du fonds par encours : {_pdm_enc_s}
+- Rang du fonds dans sa catégorie (flux) : {"#" + str(_fonds_rank) + " sur " + str(len(_cat_rank_df)) if _fonds_rank else "non disponible"}
+
+Contexte macro factuel (NE PAS aller au-delà de ces faits) :
+- Taux directeur BAM : 2,25% — stable depuis mars 2025, statu quo confirmé lors de la réunion du 17 mars 2026, aucune modification en 2026
+- Déficit de liquidité bancaire structurel estimé à 146,8 Mds MAD en 2026
+- Croissance économique projetée : 5,6% en 2026 (Bank Al-Maghrib, mars 2026)
+- Inflation projetée : 0,8% en 2026
+
+═══ QUESTIONS ANALYTIQUES OBLIGATOIRES ═══
+Ces questions doivent être traitées explicitement dans le corps du texte :
+
+Q1. CONCENTRATION DES FLUX : Quelle est la part des {_nb_outliers} semaines outliers dans le flux cumulé total ({fmt_money(_fonds_total_sr)}) ? Ce ratio révèle-t-il un mode de collecte régulier ou par impulsions ponctuelles ? Conclure explicitement.
+
+Q2. MÉDIANE VS MOYENNE : L'écart entre le flux médian ({fmt_money(_fonds_median_sr)}) et la moyenne ({fmt_money(_fonds_mean_sr)}) est-il significatif ? Que dit cet écart sur la distribution réelle des flux semaine par semaine — la majorité des semaines sont-elles proches de zéro ?
+
+Q3. DOUBLE PIC : Comparer séparément :
+- La semaine PRÉCÉDANT le pic : {fmt_money(_pre_peak_sr)} vs pic {fmt_money(_peak_row.SR)}
+  → Ces deux valeurs sont-elles proches ? Si oui, signal de double saisie.
+- La semaine SUIVANT le pic : {fmt_money(_post_peak_sr)} vs pic {fmt_money(_peak_row.SR)}
+  → Une chute brutale après le pic confirme-t-elle le caractère isolé de l'opération ?
+Traiter ces deux comparaisons séparément et conclure sur la nature probable du pic.
+
+Q4. TENDANCE RÉELLE : La tendance haussière de la 2ème moitié ({fmt_money(_trend_second)}) se confirme-t-elle hors outliers ({fmt_money(_trend_second_no_outliers)}) ? Ou est-elle entièrement portée par les semaines anomales ? Conclure sur la robustesse de cette tendance.
+
+Q5. CREUX RELATIF : Le creux de {fmt_money(_trough_row.SR)} représente {fmt_pct(abs(_trough_row.SR) / abs(_peak_row.SR) if _peak_row is not None and _peak_row.SR != 0 else 0)} du pic en valeur absolue. Est-ce cohérent avec un rachat réel dans un fonds de cette catégorie, ou faut-il suspecter une erreur de saisie ? Argumenter.
+
+Q6. ROTATION PAR ENCOURS : Le ratio flux moyen hebdomadaire / encours est de {_rot_moy_s}. Est-ce un niveau de rotation normal pour un fonds {_fonds_cat} institutionnel ? Le pic représente {_rot_pic_s} de l'encours total — qualifier explicitement le caractère exceptionnel ou non de ce mouvement par rapport à la taille du fonds.
+
+Q7. PART DE MARCHÉ PAR ENCOURS : La part de marché du fonds par encours est de {_pdm_enc_s}, alors que sa part par flux est de {_pdm_flux_s}. Ces deux ratios sont-ils cohérents entre eux ? Un écart important entre part de marché encours et part de marché flux suggère-t-il une sur ou sous-collecte relative à la taille du fonds ?
+
+═══ RÈGLES ABSOLUES ═══
+1. FLUX UNIQUEMENT : Ne jamais confondre flux S&R avec cours, valeur liquidative ou performance. L'Actif Net (AN) fourni ci-dessus représente l'encours total du fonds — il ne doit pas être confondu avec les flux S&R qui mesurent uniquement les souscriptions et rachats nets.
+
+2. CAUSALITÉ INTERDITE : Toute hypothèse explicative doit être introduite par un marqueur explicite ("pourrait laisser supposer", "laisse hypothétiquement penser", "hypothèse non vérifiable ici"). Jamais comme un fait établi.
+
+3. DÉFINITION D'UNE ANOMALIE : Une semaine est considérée anomale si son flux s'écarte de plus d'un écart-type ({fmt_money(_fonds_std_sr)}) par rapport à la moyenne ({fmt_money(_fonds_mean_sr)}). Toute semaine anomale doit être nommée, chiffrée et questionnée.
+
+4. VARIATION DE TENDANCE : Si la base de la première moitié est quasi-nulle ou inférieure à 10 000 MAD, ne pas calculer de variation en pourcentage. Exprimer uniquement la variation en valeur absolue.
+
+5. INTERDITS absolus : "les gestionnaires ont pris des décisions judicieuses", "les investisseurs ont pris confiance", "performance solide", "résultats encourageants", "dynamique positive", "vigilance accrue", "décisions éclairées", "suivre de près ces indicateurs", "surveillance étroite", et toute formule générique non étayée par un chiffre.
+
+6. COMPARAISON CATÉGORIE : Distinguer systématiquement la comparaison par flux (brute, non normalisée) de la comparaison par encours (part de marché réelle). La part de marché par encours est la mesure la plus fiable du positionnement relatif du fonds.
+
+7. SIGNAUX NÉGATIFS : Si le fonds présente des signaux défavorables, les formuler clairement, sans atténuation ni euphémisme.
+
+8. NOUVEAUTÉ PAR PARAGRAPHE : Chaque paragraphe introduit un angle d'analyse distinct. Aucune reformulation ni répétition d'un paragraphe à l'autre. La dernière phrase de chaque paragraphe ne doit pas reformuler ce qui vient d'être dit.
+
+9. CHIFFRES OBLIGATOIRES : Chaque phrase analytique contient au moins un chiffre issu des données fournies.
+
+10. §4 ACTIONNABLE : Chaque point suit strictement la structure : [signal observé chiffré] → [risque concret] → [action spécifique réalisable par une équipe de gestion]. Les formulations vagues sont interdites.
+
+11. CREUX SUSPECT : Si le ratio creux/pic en valeur absolue est inférieur à 1%, signaler explicitement que la valeur du creux est anormalement faible en regard du pic, et que cela pourrait indiquer une erreur de saisie plutôt qu'un rachat réel — recommander une vérification des données sources.
+
+12. VOLATILITÉ ≠ TENDANCE DÉFAVORABLE : Ne pas conclure à une tendance globale défavorable sur la seule base d'un coefficient de variation élevé. Distinguer explicitement la volatilité des flux de la direction de la tendance.
+
+13. ENCOURS COMME RÉFÉRENTIEL : Toute qualification d'un flux comme "important", "faible" ou "exceptionnel" doit être rapportée à l'encours du fonds ({_fonds_an_s}), pas uniquement à la moyenne des flux. Un flux de 100M est négligeable sur un fonds de 10Mds, mais exceptionnel sur un fonds de 200M.
+
+Rédige un unique paragraphe de 4 à 5 phrases destiné à un gérant de fonds. Mentionne obligatoirement : le flux cumulé ({fmt_money(_fonds_total_sr)}), la tendance (hausse/baisse), le positionnement vs la catégorie {_fonds_cat} (rang #{_fonds_rank if _fonds_rank else "—"}), et un signal d'attention concret. Chiffres obligatoires dans chaque phrase. Français direct, sans introduction ni conclusion générique."""
 
             with st.spinner(f"LLaMA 3.3 analyse {_fonds_sel}..."):
                 _fonds_analysis = call_gemini(_prompt_fonds)
@@ -1707,71 +2435,90 @@ st.markdown("---")
 
 # ── CLASSEMENT GÉNÉRAL DES SG ──
 section_header("Classement général des sociétés de gestion", "Toutes classifications confondues · date sélectionnée")
+
+_sgr_col1, _sgr_col2 = st.columns([1, 1])
+with _sgr_col1:
+    _all_sg_rank_dates = sorted(tidy["Date"].dropna().unique().tolist(), key=mmdd_sort)
+    _EXTRA_WEEKLY = {"24/03"}
+    _sg_rank_dates = [d for d in _all_sg_rank_dates if ddmm_to_dt(d, YEAR).weekday() == 4 or d in _EXTRA_WEEKLY]
+    if not _sg_rank_dates:
+        _sg_rank_dates = _all_sg_rank_dates
+    _sg_rank_date_sel = st.selectbox("Date (vendredis)", _sg_rank_dates, index=len(_sg_rank_dates) - 1, key="sg_rank_date_sel")
+with _sgr_col2:
+    if not asfim_sr.empty and "Classification" in asfim_sr.columns:
+        _sgr_cls_opts = ["TOUS"] + sorted(asfim_sr["Classification"].dropna().unique().tolist())
+    else:
+        _sgr_cls_opts = ["TOUS"] + sorted(tidy["Bloc"].dropna().unique().tolist())
+    _sg_rank_cls_sel = st.selectbox("Classification", _sgr_cls_opts, index=0, key="sg_rank_cls_sel")
+
+_sgr_src = tidy[tidy["Date"] == _sg_rank_date_sel].copy()
+if _sg_rank_cls_sel != "TOUS":
+    _sgr_src = _sgr_src[_sgr_src["Bloc"] == _sg_rank_cls_sel]
+
 sg_rank = (
-    tidy[tidy["Date"] == date_sel]
+    _sgr_src
     .groupby("SG", as_index=False)["SR"]
     .sum(min_count=1)
     .rename(columns={"SR": "S&R"})
     .sort_values("S&R", ascending=False)
     .reset_index(drop=True)
 )
-sg_rank.index += 1  # classement à partir de 1
+sg_rank.index += 1
 if sg_rank.empty:
     st.info("Aucune donnée SG pour cette date.")
 else:
-    _r_tbl, _r_chart = st.columns([1, 2])
-    with _r_tbl:
-        st.markdown(html_table(sg_rank[["SG", "S&R"]].reset_index().rename(columns={"index": "#"}), ["#", "SG", "S&R"], max_h=460), unsafe_allow_html=True)
-        export_button(sg_rank[["SG", "S&R"]].reset_index().rename(columns={"index": "#"}), f"classement_sg_{date_sel.replace('/','')}.csv")
-    with _r_chart:
-        # Évolution du rang dans le temps
-        _rank_dates = sorted(tidy["Date"].dropna().unique().tolist(), key=mmdd_sort)
-        _rank_rows = []
-        for _d in _rank_dates:
-            _day = (
-                tidy[tidy["Date"] == _d]
-                .groupby("SG", as_index=False)["SR"].sum(min_count=1)
-                .sort_values("SR", ascending=False)
-                .reset_index(drop=True)
-            )
-            _day["Rang"] = _day.index + 1
-            _day["Date_dt"] = ddmm_to_dt(_d, YEAR)
-            _rank_rows.append(_day[["SG", "Date_dt", "Rang"]])
-        _rank_df = pd.concat(_rank_rows, ignore_index=True) if _rank_rows else pd.DataFrame()
+    # Tableau pleine largeur
+    st.markdown(html_table(sg_rank[["SG", "S&R"]].reset_index().rename(columns={"index": "#"}), ["#", "SG", "S&R"], max_h=460), unsafe_allow_html=True)
+    export_button(sg_rank[["SG", "S&R"]].reset_index().rename(columns={"index": "#"}), f"classement_sg_{_sg_rank_date_sel.replace('/','')}.csv")
 
-        if not _rank_df.empty:
-            _all_sg_rank = sorted(_rank_df["SG"].dropna().unique().tolist())
-            # Défaut : BMCE + top 3 concurrents par flux à date sélectionnée
-            _bmce_default = pick_bmce_sg(_all_sg_rank)
-            _top3_default = [s for s in sg_rank["SG"].head(4).tolist() if s != _bmce_default][:3]
-            _default_sel = ([_bmce_default] if _bmce_default else []) + _top3_default
-            _sg_rank_sel = st.multiselect(
-                "SG à afficher (rang)", _all_sg_rank,
-                default=[s for s in _default_sel if s in _all_sg_rank],
-                key="rank_sg_sel"
-            )
-            if _sg_rank_sel:
-                _rank_top = _rank_df[_rank_df["SG"].isin(_sg_rank_sel)]
-                _rank_chart = (
-                    alt.Chart(_rank_top)
-                    .mark_line(strokeWidth=2.5, point=alt.OverlayMarkDef(filled=True, size=50))
-                    .encode(
-                        x=alt.X("Date_dt:T", title="Date", axis=alt.Axis(format="%m/%d")),
-                        y=alt.Y("Rang:Q", title="Rang",
-                                scale=alt.Scale(reverse=True),
-                                axis=alt.Axis(tickMinStep=1)),
-                        color=alt.Color("SG:N", title=None, scale=alt.Scale(range=PALETTE)),
-                        tooltip=[
-                            alt.Tooltip("Date_dt:T", title="Date", format="%d/%m/%Y"),
-                            alt.Tooltip("SG:N", title="SG"),
-                            alt.Tooltip("Rang:Q", title="Rang"),
-                        ],
-                    )
-                    .properties(title="Évolution du rang", height=360, background=BG)
+    # Graphique évolution du rang pleine largeur
+    st.markdown(f'<div style="font-weight:700;color:{PRIMARY};font-size:.85rem;margin:24px 0 8px 0;">Évolution du rang dans le temps</div>', unsafe_allow_html=True)
+    _rank_dates = sorted(tidy["Date"].dropna().unique().tolist(), key=mmdd_sort)
+    _rank_rows = []
+    for _d in _rank_dates:
+        _day = (
+            tidy[tidy["Date"] == _d]
+            .groupby("SG", as_index=False)["SR"].sum(min_count=1)
+            .sort_values("SR", ascending=False)
+            .reset_index(drop=True)
+        )
+        _day["Rang"] = _day.index + 1
+        _day["Date_dt"] = ddmm_to_dt(_d, YEAR)
+        _rank_rows.append(_day[["SG", "Date_dt", "Rang"]])
+    _rank_df = pd.concat(_rank_rows, ignore_index=True) if _rank_rows else pd.DataFrame()
+
+    if not _rank_df.empty:
+        _all_sg_rank = sorted(_rank_df["SG"].dropna().unique().tolist())
+        _bmce_default = pick_bmce_sg(_all_sg_rank)
+        _top3_default = [s for s in sg_rank["SG"].head(4).tolist() if s != _bmce_default][:3]
+        _default_sel = ([_bmce_default] if _bmce_default else []) + _top3_default
+        _sg_rank_sel = st.multiselect(
+            "SG à afficher", _all_sg_rank,
+            default=[s for s in _default_sel if s in _all_sg_rank],
+            key="rank_sg_sel"
+        )
+        if _sg_rank_sel:
+            _rank_top = _rank_df[_rank_df["SG"].isin(_sg_rank_sel)]
+            _rank_chart = (
+                alt.Chart(_rank_top)
+                .mark_line(strokeWidth=2.5, point=alt.OverlayMarkDef(filled=True, size=50))
+                .encode(
+                    x=alt.X("Date_dt:T", title="Date", axis=alt.Axis(format="%m/%d")),
+                    y=alt.Y("Rang:Q", title="Rang",
+                            scale=alt.Scale(reverse=True),
+                            axis=alt.Axis(tickMinStep=1)),
+                    color=alt.Color("SG:N", title=None, scale=alt.Scale(range=PALETTE)),
+                    tooltip=[
+                        alt.Tooltip("Date_dt:T", title="Date", format="%d/%m/%Y"),
+                        alt.Tooltip("SG:N", title="SG"),
+                        alt.Tooltip("Rang:Q", title="Rang"),
+                    ],
                 )
-                st.altair_chart(_rank_chart, use_container_width=True)
-            else:
-                st.info("Sélectionne au moins une SG.")
+                .properties(title="Évolution du rang", height=400, background=BG)
+            )
+            st.altair_chart(_rank_chart, use_container_width=True)
+        else:
+            st.info("Sélectionne au moins une SG.")
 
 st.markdown("---")
 
@@ -1907,9 +2654,12 @@ if not asfim_sr.empty and sg_pick in asfim_sr["SG"].values:
     _fonds_day = asfim_sr[(asfim_sr["SG"] == sg_pick) & (asfim_sr["Date"] == _sg_date_sel)]
     if drill_cat != "TOUS":
         _fonds_day = _fonds_day[_fonds_day["Classification"] == drill_cat]
-    _nb_collecte   = int((_fonds_day["SR"] > 0).sum())
-    _nb_decollecte = int((_fonds_day["SR"] < 0).sum())
+    _fonds_collecte   = _fonds_day[_fonds_day["SR"] > 0]["OPCVM"].dropna().tolist()
+    _fonds_decollecte = _fonds_day[_fonds_day["SR"] < 0]["OPCVM"].dropna().tolist()
+    _nb_collecte   = len(_fonds_collecte)
+    _nb_decollecte = len(_fonds_decollecte)
 else:
+    _fonds_collecte = _fonds_decollecte = []
     _nb_collecte = _nb_decollecte = 0
 
 # KPIs
@@ -1922,270 +2672,27 @@ _k5.markdown(_kpi("Fonds en décollecte", str(_nb_decollecte), RED), unsafe_allo
 
 st.markdown("<div style='margin-top:20px'></div>", unsafe_allow_html=True)
 
-# Tableau (gauche) + Graphique (droite)
-_col_tbl, _col_chart = st.columns([1, 2])
-
-with _col_tbl:
-    st.markdown(f'<div style="font-weight:700;color:{PRIMARY};font-size:.85rem;margin-bottom:8px;">Par catégorie — {_sg_date_sel}</div>', unsafe_allow_html=True)
-    if _sg_day_grp.empty:
-        st.info("Aucune donnée.")
-    else:
-        _sg_day_grp = _sg_day_grp.rename(columns={"Bloc": "Classification", "SR": "S&R"})
-        st.markdown(html_table(_sg_day_grp.reset_index(drop=True), ["Classification", "S&R"], max_h=300), unsafe_allow_html=True)
-        export_button(_sg_day_grp, f"analyse_{sg_pick.replace(' ','_')}_{_sg_date_sel.replace('/','')}.csv")
-
-with _col_chart:
-    st.markdown(f'<div style="font-weight:700;color:{PRIMARY};font-size:.85rem;margin-bottom:8px;">Évolution S&R par catégorie</div>', unsafe_allow_html=True)
-    sg_cd = sg_tidy.groupby(["Date_dt", "Bloc"], as_index=False)["SR"].sum()
-    if not sg_cd.empty:
-        st.altair_chart(line_chart(sg_cd, "Date_dt", "SR", color="Bloc", title=f"{sg_pick}"), use_container_width=True)
-
-st.markdown("---")
-
-# ── COMPETITIVE FLOW PERFORMANCE ──
-section_header("Performance concurrentielle des flux", "Comparaison S&R entre sociétés de gestion")
-
-# Source : ASFIM (par fonds) agrégé par SG/Date — même source que Analyse par SG
-# Fallback : Recap S&R si ASFIM non disponible
-if not asfim_sr.empty:
-    flow_daily = asfim_sr.groupby(["SG", "Date"], as_index=False)["SR"].sum(min_count=1)
-    _flow_source = "ASFIM"
+# Tableau pleine largeur
+st.markdown(f'<div style="font-weight:700;color:{PRIMARY};font-size:.85rem;margin-bottom:8px;">Par fonds — {_sg_date_sel}</div>', unsafe_allow_html=True)
+if not asfim_sr.empty and sg_pick in asfim_sr["SG"].values and not _fonds_day.empty:
+    _fonds_tbl = _fonds_day[["OPCVM", "Classification", "SR"]].copy()
+    _fonds_tbl = _fonds_tbl.rename(columns={"OPCVM": "Fonds", "SR": "S&R"})
+    _fonds_tbl = _fonds_tbl.sort_values("S&R", ascending=False).reset_index(drop=True)
+    st.markdown(html_table(_fonds_tbl, ["Fonds", "Classification", "S&R"], max_h=400), unsafe_allow_html=True)
+    export_button(_fonds_tbl, f"analyse_{sg_pick.replace(' ','_')}_{_sg_date_sel.replace('/','')}.csv")
+elif not _sg_day_grp.empty:
+    _sg_day_grp = _sg_day_grp.rename(columns={"Bloc": "Classification", "SR": "S&R"})
+    st.markdown(html_table(_sg_day_grp.reset_index(drop=True), ["Classification", "S&R"], max_h=400), unsafe_allow_html=True)
+    export_button(_sg_day_grp, f"analyse_{sg_pick.replace(' ','_')}_{_sg_date_sel.replace('/','')}.csv")
 else:
-    flow_daily = tidy_all.groupby(["SG", "Date"], as_index=False)["SR"].sum(min_count=1)
-    _flow_source = "Recap S&R"
+    st.info("Aucune donnée.")
 
-flow_daily["Date_dt"] = flow_daily["Date"].apply(lambda s: ddmm_to_dt(s, YEAR))
-flow_daily = flow_daily.dropna(subset=["SG", "Date_dt"]).copy()
+# Graphique pleine largeur
+st.markdown(f'<div style="font-weight:700;color:{PRIMARY};font-size:.85rem;margin:24px 0 8px 0;">Évolution S&R par catégorie</div>', unsafe_allow_html=True)
+sg_cd = sg_tidy.groupby(["Date_dt", "Bloc"], as_index=False)["SR"].sum()
+if not sg_cd.empty:
+    st.altair_chart(line_chart(sg_cd, "Date_dt", "SR", color="Bloc", title=f"{sg_pick}"), use_container_width=True)
 
-if flow_daily.empty:
-    st.info("Données SG insuffisantes pour lancer l'analyse comparative des flux.")
-else:
-    if not asfim_cls_map.empty:
-        cmp_classes = sorted(asfim_cls_map["Classification"].dropna().unique().tolist())
-        cmp_class = st.selectbox("Type de fonds (comparaison)", ["TOUS"] + cmp_classes, index=0)
-        if cmp_class != "TOUS":
-            allowed_cmp_sg = set(
-                asfim_cls_map.loc[asfim_cls_map["Classification"] == cmp_class, "SG"]
-                .dropna()
-                .unique()
-                .tolist()
-            )
-            flow_daily = flow_daily[flow_daily["SG"].isin(allowed_cmp_sg)]
-    else:
-        cmp_classes = sorted(tidy_all["Bloc"].dropna().unique().tolist())
-        cmp_class = st.selectbox("Type de fonds (comparaison)", ["TOUS"] + cmp_classes, index=0)
-        if cmp_class != "TOUS":
-            allowed_cmp_sg = set(
-                tidy_all.loc[tidy_all["Bloc"] == cmp_class, "SG"]
-                .dropna()
-                .unique()
-                .tolist()
-            )
-            flow_daily = flow_daily[flow_daily["SG"].isin(allowed_cmp_sg)]
-
-    if flow_daily.empty or flow_daily["SG"].nunique() < 2:
-        st.info("Pas assez de SG dans ce type de fonds pour comparer BMCE à un concurrent.")
-        st.stop()
-
-    market_dates = sorted(flow_daily["Date_dt"].dropna().unique().tolist())
-    market_abs = (
-        flow_daily.groupby("Date_dt")["SR"]
-        .sum(min_count=1)
-        .reindex(market_dates, fill_value=0.0)
-        .abs()
-    )
-
-    sg_pool = sorted(flow_daily["SG"].dropna().unique().tolist())
-    bmce_default = pick_bmce_sg(sg_pool) or sg_pool[0]
-
-    c_cmp1, c_cmp2 = st.columns(2)
-    with c_cmp1:
-        bmce_sg = st.selectbox(
-            "Entité BMCE (base flux)",
-            sg_pool,
-            index=sg_pool.index(bmce_default) if bmce_default in sg_pool else 0,
-        )
-    peer_options = [sg for sg in sg_pool if sg != bmce_sg]
-    peer_default = peer_options[0]
-    if peer_options:
-        peer_rank = (
-            flow_daily[flow_daily["SG"].isin(peer_options)]
-            .groupby("SG", as_index=False)["SR"]
-            .sum(min_count=1)
-        )
-        if not peer_rank.empty:
-            peer_rank["abs_flow"] = peer_rank["SR"].abs()
-            peer_default = peer_rank.sort_values("abs_flow", ascending=False)["SG"].iloc[0]
-    with c_cmp2:
-        peer_sg = st.selectbox(
-            "Concurrent",
-            peer_options,
-            index=peer_options.index(peer_default) if peer_default in peer_options else 0,
-        )
-
-    bmce_ts = flow_series_on_market_days(flow_daily, bmce_sg, market_dates)
-    peer_ts = flow_series_on_market_days(flow_daily, peer_sg, market_dates)
-    bmce_kpi = compute_flow_kpis(bmce_ts, market_abs)
-    peer_kpi = compute_flow_kpis(peer_ts, market_abs)
-
-    # MTD : depuis ASFIM via bmce_kpi/peer_kpi — chaque publication hebdomadaire couvre la semaine entière
-    # Somme des semaines du mois courant = MTD correct
-    _bmce_mtd = bmce_kpi["mtd_net_flow"]
-    _peer_mtd  = peer_kpi["mtd_net_flow"]
-    # Pour le debug : identifier les dates ASFIM du mois courant
-    _last_dt_asfim = pd.Timestamp(max(market_dates))
-    _mtd_month, _mtd_year = _last_dt_asfim.month, _last_dt_asfim.year
-
-    # ── DEBUG ──────────────────────────────────────────────────────────────
-    with st.expander("🔍 Debug — Performance concurrentielle"):
-        st.markdown(f"**Source des flux :** `{_flow_source}` agrégé par SG/Date  |  **Filtre :** `{cmp_class}`")
-        st.markdown(f"**Dates de marché utilisées :** {len(market_dates)} dates · de `{market_dates[0].date() if market_dates else '—'}` à `{market_dates[-1].date() if market_dates else '—'}`")
-
-        _dc1, _dc2 = st.columns(2)
-        with _dc1:
-            st.markdown(f"**{bmce_sg} — flux bruts (flow_daily)**")
-            _bmce_raw = flow_daily[flow_daily["SG"] == bmce_sg].sort_values("Date_dt")
-            st.dataframe(_bmce_raw[["Date", "SR"]].reset_index(drop=True), height=200)
-            st.markdown(f"Nb lignes : `{len(_bmce_raw)}`  |  Somme SR : `{fmt_money(_bmce_raw['SR'].sum())}`")
-            st.markdown("**Série reindexée sur dates marché (bmce_ts) :**")
-            st.dataframe(bmce_ts, height=200)
-            st.markdown(f"YTD calculé (somme séries) : `{fmt_money(bmce_kpi['ytd_net_flow'])}`")
-            st.markdown(f"YTD Excel (ALL OPCVM) : **`{fmt_money(all_opcvm_ytd.get(bmce_sg, float('nan')))}`** ← valeur utilisée")
-
-        with _dc2:
-            st.markdown(f"**{peer_sg} — flux bruts (flow_daily)**")
-            _peer_raw = flow_daily[flow_daily["SG"] == peer_sg].sort_values("Date_dt")
-            st.dataframe(_peer_raw[["Date", "SR"]].reset_index(drop=True), height=200)
-            st.markdown(f"Nb lignes : `{len(_peer_raw)}`  |  Somme SR : `{fmt_money(_peer_raw['SR'].sum())}`")
-            st.markdown("**Série reindexée sur dates marché (peer_ts) :**")
-            st.dataframe(peer_ts, height=200)
-            st.markdown(f"YTD calculé (somme séries) : `{fmt_money(peer_kpi['ytd_net_flow'])}`")
-            st.markdown(f"YTD Excel (ALL OPCVM) : **`{fmt_money(all_opcvm_ytd.get(peer_sg, float('nan')))}`** ← valeur utilisée")
-
-        st.markdown(f"**MTD — mois retenu : {_mtd_month:02d}/{_mtd_year} (source : ASFIM — publications hebdomadaires)**")
-        _dc3, _dc4 = st.columns(2)
-        with _dc3:
-            st.markdown(f"**{bmce_sg} — semaines ASFIM du mois**")
-            _bmce_asfim_mtd = (
-                flow_daily[
-                    (flow_daily["SG"] == bmce_sg) &
-                    (flow_daily["Date_dt"].dt.month == _mtd_month) &
-                    (flow_daily["Date_dt"].dt.year == _mtd_year)
-                ][["Date","SR"]].sort_values("Date")
-            )
-            st.dataframe(_bmce_asfim_mtd.reset_index(drop=True), height=200)
-            st.markdown(f"**Total MTD : `{fmt_money(_bmce_mtd)}`**")
-        with _dc4:
-            st.markdown(f"**{peer_sg} — semaines ASFIM du mois**")
-            _peer_asfim_mtd = (
-                flow_daily[
-                    (flow_daily["SG"] == peer_sg) &
-                    (flow_daily["Date_dt"].dt.month == _mtd_month) &
-                    (flow_daily["Date_dt"].dt.year == _mtd_year)
-                ][["Date","SR"]].sort_values("Date")
-            )
-            st.dataframe(_peer_asfim_mtd.reset_index(drop=True), height=200)
-            st.markdown(f"**Total MTD : `{fmt_money(_peer_mtd)}`**")
-
-        st.markdown("**Flux marché total par date (market_abs) :**")
-        _mkt_df = pd.DataFrame({"Date_dt": market_abs.index, "Market_abs": market_abs.values})
-        st.dataframe(_mkt_df.tail(20), height=180)
-
-        st.markdown("**Résumé des KPIs bruts :**")
-        _pct_keys = {"positive_day_ratio", "abs_market_share"}
-        _kpi_debug = pd.DataFrame([
-            {"KPI": k,
-             bmce_sg: (fmt_pct(bmce_kpi[k]) if k in _pct_keys else fmt_money(bmce_kpi[k])) if isinstance(bmce_kpi[k], float) else str(bmce_kpi[k]),
-             peer_sg: (fmt_pct(peer_kpi[k]) if k in _pct_keys else fmt_money(peer_kpi[k])) if isinstance(peer_kpi[k], float) else str(peer_kpi[k])}
-            for k in bmce_kpi
-        ])
-        st.dataframe(_kpi_debug, height=280)
-    # ── FIN DEBUG ──────────────────────────────────────────────────────────
-
-    # YTD : section ALL OPCVM du Recap S&R (valeur agrégée exacte)
-    _bmce_ytd = all_opcvm_ytd.get(bmce_sg, bmce_kpi["ytd_net_flow"])
-    _peer_ytd = all_opcvm_ytd.get(peer_sg, peer_kpi["ytd_net_flow"])
-
-    _ytd_ecart  = ((_bmce_ytd - _peer_ytd)
-                   if pd.notna(_bmce_ytd) and pd.notna(_peer_ytd) else np.nan)
-    _mtd_ecart  = _bmce_mtd - _peer_mtd
-    _vol_ecart  = peer_kpi["flow_volatility"] - bmce_kpi["flow_volatility"]
-    m1, m2, m3 = st.columns(3)
-    m1.markdown(_kpi("Écart flux net YTD",
-        fmt_money(_ytd_ecart), GREEN if (pd.notna(_ytd_ecart) and _ytd_ecart >= 0) else RED),
-        unsafe_allow_html=True)
-    m2.markdown(_kpi("Écart flux net MTD",
-        fmt_money(_mtd_ecart), GREEN if (pd.notna(_mtd_ecart) and _mtd_ecart >= 0) else RED),
-        unsafe_allow_html=True)
-    m3.markdown(_kpi("Écart volatilité des flux",
-        fmt_money(_vol_ecart), GREEN if (pd.notna(_vol_ecart) and _vol_ecart >= 0) else RED),
-        unsafe_allow_html=True)
-
-    cmp_rows = [
-        {
-            "Indicateur": "Flux net YTD",
-            "BMCE": fmt_money(_bmce_ytd),
-            "Concurrent": fmt_money(_peer_ytd),
-            "Écart (BMCE - Concurrent)": fmt_money(_ytd_ecart),
-        },
-        {
-            "Indicateur": "Flux net MTD",
-            "BMCE": fmt_money(_bmce_mtd),
-            "Concurrent": fmt_money(_peer_mtd),
-            "Écart (BMCE - Concurrent)": fmt_money(_mtd_ecart),
-        },
-        {
-            "Indicateur": "Flux net 5 derniers jours",
-            "BMCE": fmt_money(bmce_kpi["last_5d_net_flow"]),
-            "Concurrent": fmt_money(peer_kpi["last_5d_net_flow"]),
-            "Écart (BMCE - Concurrent)": fmt_money(bmce_kpi["last_5d_net_flow"] - peer_kpi["last_5d_net_flow"]),
-        },
-        {
-            "Indicateur": "Volatilité des flux",
-            "BMCE": fmt_money(bmce_kpi["flow_volatility"]),
-            "Concurrent": fmt_money(peer_kpi["flow_volatility"]),
-            "Écart (BMCE - Concurrent)": fmt_money(bmce_kpi["flow_volatility"] - peer_kpi["flow_volatility"]),
-        },
-    ]
-    _cmp_df = pd.DataFrame(cmp_rows)
-    st.markdown(
-        html_table(_cmp_df, ["Indicateur", "BMCE", "Concurrent", "Écart (BMCE - Concurrent)"], max_h=380),
-        unsafe_allow_html=True,
-    )
-    export_button(_cmp_df.rename(columns={"BMCE": bmce_sg, "Concurrent": peer_sg}),
-                  f"comparaison_{bmce_sg.replace(' ','_')}_vs_{peer_sg.replace(' ','_')}.csv")
-
-    # Graphique cumulé par catégorie — un graphique par SG, une courbe par bloc
-    def _cumul_by_bloc(sg):
-        s = (
-            tidy_all[tidy_all["SG"] == sg]
-            .groupby(["Date", "Bloc"], as_index=False)["SR"]
-            .sum(min_count=1)
-        )
-        s["Date_dt"] = s["Date"].apply(lambda d: ddmm_to_dt(d, YEAR))
-        s = s.sort_values(["Bloc", "Date_dt"])
-        s["Cumulative_SR"] = s.groupby("Bloc")["SR"].cumsum()
-        return s
-
-    _gc1, _gc2 = st.columns(2)
-    with _gc1:
-        _bmce_bloc = _cumul_by_bloc(bmce_sg)
-        if not _bmce_bloc.empty:
-            st.altair_chart(
-                line_chart(_bmce_bloc, "Date_dt", "Cumulative_SR", color="Bloc",
-                           title=f"{bmce_sg} — flux cumulé par catégorie"),
-                use_container_width=True,
-            )
-    with _gc2:
-        _peer_bloc = _cumul_by_bloc(peer_sg)
-        if not _peer_bloc.empty:
-            st.altair_chart(
-                line_chart(_peer_bloc, "Date_dt", "Cumulative_SR", color="Bloc",
-                           title=f"{peer_sg} — flux cumulé par catégorie"),
-                use_container_width=True,
-            )
-
-st.markdown("---")
 
 # ══════════════════════════════════════════════
 # ── RAPPORT PDF ──
@@ -2225,18 +2732,7 @@ Données factuelles à utiliser :
 - Plus forts rachats : {_flop3_txt}
 - BMCE Capital Gestion — S&R période : {fmt_money(_rpt_bmce_sr)} | Rang : {_rpt_bmce_rank}/{len(_rpt_sg)} | YTD 2026 : {fmt_money(_rpt_ytd)} | Part de marché : {fmt_pct(_rpt_mkt_share)}
 
-Plan des 5 paragraphes :
-1. Vue d'ensemble du marché OPCVM marocain sur cette période (tendance, ampleur des flux, dynamique générale)
-2. Analyse détaillée de BMCE Capital Gestion — positionnement, forces et points d'attention vs concurrents
-3. Lecture macro-économique : politique monétaire BAM, liquidité bancaire locale, comportement des investisseurs institutionnels
-4. Facteurs géopolitiques et internationaux susceptibles d'avoir influencé les flux (contexte 2026 : tensions commerciales, marchés émergents, prix matières premières, flux de capitaux vers/hors Afrique)
-5. Perspectives pour les prochaines semaines et recommandations de vigilance
-
-Contraintes de style :
-- Français professionnel et fluide, ton de rapport institutionnel
-- Texte narratif continu — aucune puce, aucun titre, aucun sous-titre, aucun gras
-- Intégrer naturellement les chiffres dans le texte
-- Chaque paragraphe fait 4 à 6 phrases"""
+Rédige un unique paragraphe de 4 à 5 phrases destiné à un gérant. Couvre obligatoirement : collecte nette totale ({fmt_money(total_sel)}), les 2 meilleurs collecteurs avec leurs montants, le positionnement de BMCE Capital Gestion (rang {_rpt_bmce_rank}, S&R {fmt_money(_rpt_bmce_sr)}, part de marché {fmt_pct(_rpt_mkt_share)}), et un point de vigilance pour la semaine suivante. Français direct, chiffres intégrés dans le texte, sans titre ni introduction."""
 
     with st.spinner("LLaMA 3.3 rédige le rapport..."):
         _gemini_raw = call_gemini(_gemini_prompt)
@@ -2333,7 +2829,7 @@ Contraintes de style :
 if show_audit:
     st.markdown("---")
     section_header("Data (audit)", "Données brutes extraites pour vérification")
-    audit = tidy.drop(columns=["Date_dt"]).reset_index(drop=True)
+    audit = tidy.drop(columns=[c for c in ["Date_dt"] if c in tidy.columns]).reset_index(drop=True)
     acols = list(audit.columns)
 
     hdr = "".join(
