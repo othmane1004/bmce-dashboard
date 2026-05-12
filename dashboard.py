@@ -12,7 +12,10 @@ import streamlit.components.v1 as components
 import altair as alt
 
 # ── Groq API (LLaMA 3.3 70B) ──
-GROQ_API_KEY = "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"
+try:
+    GROQ_API_KEY = (Path(__file__).parent / ".bmce_cache" / ".groq_key").read_text().strip()
+except Exception:
+    GROQ_API_KEY = ""
 
 def call_gemini(prompt: str) -> str:
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -38,20 +41,21 @@ st.set_page_config(page_title="BMCE Capital Gestion — S&R", layout="wide", ini
 # ──────────────────────────────────────────────
 # DESIGN TOKENS — BMCE Capital Gestion
 # ──────────────────────────────────────────────
-PRIMARY    = "#1C1C1C"
+NAVY       = "#0B1F3A"       # bleu marine BMCE (header uniquement)
+PRIMARY    = "#1C1C1C"       # texte principal (inchangé)
 SECONDARY  = "#4A4A4A"
 MUTED      = "#9A9A9A"
 BG         = "#FFFFFF"
 SURFACE    = "#F5F5F5"
 SIDEBAR_BG = "#FAFAFA"
 BORDER     = "#E0E0E0"
-ACCENT     = "#C0001A"      # rouge BMCE
+ACCENT     = "#C0001A"       # rouge BMCE
 ACCENT2    = "#960014"
 GREEN      = "#1A7A4A"
 RED        = "#C0001A"
 CHART_GRID = "#F0F0F0"
-PALETTE    = ["#C0001A", "#1C52C8", "#F59E0B", "#10B981", "#8B5CF6",
-              "#EC4899", "#06B6D4", "#84CC16", "#F97316", "#6366F1",
+PALETTE    = ["#C0001A", "#1C52C8", "#0B5394", "#F59E0B", "#10B981",
+              "#8B5CF6", "#EC4899", "#06B6D4", "#84CC16", "#F97316",
               "#14B8A6", "#EF4444", "#A855F7", "#22C55E", "#EAB308"]
 
 _T = dict(P=PRIMARY, S=SECONDARY, M=MUTED, B=BG, SF=SURFACE,
@@ -217,6 +221,11 @@ button[data-testid="StyledFullScreenButton"] svg{
 
 /* text */
 p,span,label,div,.stMarkdown *{color:%(P)s!important;-webkit-text-fill-color:%(P)s!important}
+.navy-title{color:#FFFFFF!important;-webkit-text-fill-color:#FFFFFF!important}
+.navy-sub{color:rgba(255,255,255,.55)!important;-webkit-text-fill-color:rgba(255,255,255,.55)!important}
+.kpi-label{font-size:.72rem!important;font-weight:900!important;text-transform:uppercase!important;
+  letter-spacing:.08em!important;color:%(P)s!important;-webkit-text-fill-color:%(P)s!important;
+  margin-bottom:6px!important;display:block!important;}
 
 /* selects */
 div[data-baseweb="select"]>div{border:1px solid %(BD)s!important;border-radius:4px!important;background:#fff!important}
@@ -1454,8 +1463,8 @@ def section_header(title, subtitle=""):
     """Render a clean BMCE-style section header."""
     sub_html = f'<div style="font-size:0.75rem;color:{MUTED};margin-top:3px;font-weight:400;">{subtitle}</div>' if subtitle else ""
     st.markdown(
-        f'<div style="margin:28px 0 16px 0;padding-bottom:10px;border-bottom:1px solid {BORDER};">'
-        f'<div style="display:flex;align-items:center;gap:10px;">'
+        f'<div style="margin:32px 0 18px 0;padding-bottom:12px;border-bottom:2px solid {BORDER};">'
+        f'<div style="display:flex;align-items:center;gap:12px;">'
         f'<span style="display:inline-block;width:4px;height:20px;background:{ACCENT};border-radius:2px;flex-shrink:0;"></span>'
         f'<div><div style="font-size:1.0rem;font-weight:700;color:{PRIMARY};">{title}</div>{sub_html}</div>'
         f'</div></div>',
@@ -1483,19 +1492,19 @@ if _logo_src:
 
 logo_right_html = (
     f'<img src="data:image/{logo_ext};base64,{logo_b64}" '
-    f'style="height:100px;object-fit:contain;display:block;">'
+    f'style="height:48px;object-fit:contain;display:block;">'
 ) if logo_b64 else ""
 
 st.markdown(
-    f'<div style="padding:52px 0 0 0;margin-bottom:8px;">'
-    f'  <div style="display:flex;align-items:center;gap:16px;padding-bottom:14px;border-bottom:2px solid {BORDER};">'
-    f'    {logo_html}'
-    f'    <div style="width:1px;height:32px;background:{BORDER};flex-shrink:0;"></div>'
-    f'    <div style="flex:1;">'
-    f'      <div style="font-size:1.25rem;font-weight:700;color:{PRIMARY};line-height:1.2;">Dashboard S&amp;R — ASFIM</div>'
-    f'      <div style="font-size:.78rem;color:{MUTED};font-weight:500;margin-top:1px;">Pilotage des flux · vue marché, classements et tendances</div>'
+    f'<div style="margin-top:52px;background:{NAVY};border-radius:10px;padding:22px 32px;margin-bottom:20px;'
+    f'box-shadow:0 4px 20px rgba(11,31,58,.15);">'
+    f'  <div style="display:flex;align-items:center;gap:16px;">'
+    f'    <div style="background:#fff;border-radius:6px;padding:6px 10px;flex-shrink:0;">{logo_html}</div>'
+    f'    <div style="width:1px;height:36px;background:rgba(255,255,255,.25);flex-shrink:0;"></div>'
+    f'    <div>'
+    f'      <div class="navy-title" style="font-size:1.2rem;font-weight:700;line-height:1.2;">Dashboard S&amp;R — ASFIM</div>'
+    f'      <div class="navy-sub" style="font-size:.76rem;margin-top:3px;">Pilotage des flux · vue marché, classements et tendances</div>'
     f'    </div>'
-    f'    {logo_right_html}'
     f'  </div>'
     f'</div>',
     unsafe_allow_html=True,
@@ -1991,10 +2000,9 @@ nb_neg = int((sg_active["SR_sel"] < -eps).sum())
 def _kpi(label, value, color=None):
     clr = color or PRIMARY
     return (
-        f'<div style="background:#fff;border:1px solid {BORDER};border-top:3px solid {clr};'
-        f'border-radius:4px;padding:14px 16px;box-shadow:0 1px 4px rgba(0,0,0,.05);">'
-        f'<div style="font-size:.65rem!important;font-weight:800!important;text-transform:uppercase;letter-spacing:.09em;'
-        f'color:{PRIMARY}!important;-webkit-text-fill-color:{PRIMARY}!important;margin-bottom:6px;">{label}</div>'
+        f'<div style="background:#fff;border:1px solid {BORDER};border-left:4px solid {NAVY};'
+        f'border-radius:6px;padding:14px 16px;box-shadow:0 1px 4px rgba(0,0,0,.05);">'
+        f'<span class="kpi-label">{label}</span>'
         f'<div style="font-size:1.25rem!important;font-weight:700!important;'
         f'color:{clr}!important;-webkit-text-fill-color:{clr}!important;'
         f'line-height:1.1;word-break:break-word;">{value}</div>'
@@ -2431,96 +2439,6 @@ Rédige un unique paragraphe de 4 à 5 phrases destiné à un gérant de fonds. 
 else:
     st.info("Les données ASFIM sont nécessaires pour cette fonctionnalité.")
 
-st.markdown("---")
-
-# ── CLASSEMENT GÉNÉRAL DES SG ──
-section_header("Classement général des sociétés de gestion", "Toutes classifications confondues · date sélectionnée")
-
-_sgr_col1, _sgr_col2 = st.columns([1, 1])
-with _sgr_col1:
-    _all_sg_rank_dates = sorted(tidy["Date"].dropna().unique().tolist(), key=mmdd_sort)
-    _EXTRA_WEEKLY = {"24/03"}
-    _sg_rank_dates = [d for d in _all_sg_rank_dates if ddmm_to_dt(d, YEAR).weekday() == 4 or d in _EXTRA_WEEKLY]
-    if not _sg_rank_dates:
-        _sg_rank_dates = _all_sg_rank_dates
-    _sg_rank_date_sel = st.selectbox("Date (vendredis)", _sg_rank_dates, index=len(_sg_rank_dates) - 1, key="sg_rank_date_sel")
-with _sgr_col2:
-    if not asfim_sr.empty and "Classification" in asfim_sr.columns:
-        _sgr_cls_opts = ["TOUS"] + sorted(asfim_sr["Classification"].dropna().unique().tolist())
-    else:
-        _sgr_cls_opts = ["TOUS"] + sorted(tidy["Bloc"].dropna().unique().tolist())
-    _sg_rank_cls_sel = st.selectbox("Classification", _sgr_cls_opts, index=0, key="sg_rank_cls_sel")
-
-_sgr_src = tidy[tidy["Date"] == _sg_rank_date_sel].copy()
-if _sg_rank_cls_sel != "TOUS":
-    _sgr_src = _sgr_src[_sgr_src["Bloc"] == _sg_rank_cls_sel]
-
-sg_rank = (
-    _sgr_src
-    .groupby("SG", as_index=False)["SR"]
-    .sum(min_count=1)
-    .rename(columns={"SR": "S&R"})
-    .sort_values("S&R", ascending=False)
-    .reset_index(drop=True)
-)
-sg_rank.index += 1
-if sg_rank.empty:
-    st.info("Aucune donnée SG pour cette date.")
-else:
-    # Tableau pleine largeur
-    st.markdown(html_table(sg_rank[["SG", "S&R"]].reset_index().rename(columns={"index": "#"}), ["#", "SG", "S&R"], max_h=460), unsafe_allow_html=True)
-    export_button(sg_rank[["SG", "S&R"]].reset_index().rename(columns={"index": "#"}), f"classement_sg_{_sg_rank_date_sel.replace('/','')}.csv")
-
-    # Graphique évolution du rang pleine largeur
-    st.markdown(f'<div style="font-weight:700;color:{PRIMARY};font-size:.85rem;margin:24px 0 8px 0;">Évolution du rang dans le temps</div>', unsafe_allow_html=True)
-    _rank_dates = sorted(tidy["Date"].dropna().unique().tolist(), key=mmdd_sort)
-    _rank_rows = []
-    for _d in _rank_dates:
-        _day = (
-            tidy[tidy["Date"] == _d]
-            .groupby("SG", as_index=False)["SR"].sum(min_count=1)
-            .sort_values("SR", ascending=False)
-            .reset_index(drop=True)
-        )
-        _day["Rang"] = _day.index + 1
-        _day["Date_dt"] = ddmm_to_dt(_d, YEAR)
-        _rank_rows.append(_day[["SG", "Date_dt", "Rang"]])
-    _rank_df = pd.concat(_rank_rows, ignore_index=True) if _rank_rows else pd.DataFrame()
-
-    if not _rank_df.empty:
-        _all_sg_rank = sorted(_rank_df["SG"].dropna().unique().tolist())
-        _bmce_default = pick_bmce_sg(_all_sg_rank)
-        _top3_default = [s for s in sg_rank["SG"].head(4).tolist() if s != _bmce_default][:3]
-        _default_sel = ([_bmce_default] if _bmce_default else []) + _top3_default
-        _sg_rank_sel = st.multiselect(
-            "SG à afficher", _all_sg_rank,
-            default=[s for s in _default_sel if s in _all_sg_rank],
-            key="rank_sg_sel"
-        )
-        if _sg_rank_sel:
-            _rank_top = _rank_df[_rank_df["SG"].isin(_sg_rank_sel)]
-            _rank_chart = (
-                alt.Chart(_rank_top)
-                .mark_line(strokeWidth=2.5, point=alt.OverlayMarkDef(filled=True, size=50))
-                .encode(
-                    x=alt.X("Date_dt:T", title="Date", axis=alt.Axis(format="%m/%d")),
-                    y=alt.Y("Rang:Q", title="Rang",
-                            scale=alt.Scale(reverse=True),
-                            axis=alt.Axis(tickMinStep=1)),
-                    color=alt.Color("SG:N", title=None, scale=alt.Scale(range=PALETTE)),
-                    tooltip=[
-                        alt.Tooltip("Date_dt:T", title="Date", format="%d/%m/%Y"),
-                        alt.Tooltip("SG:N", title="SG"),
-                        alt.Tooltip("Rang:Q", title="Rang"),
-                    ],
-                )
-                .properties(title="Évolution du rang", height=400, background=BG)
-            )
-            st.altair_chart(_rank_chart, use_container_width=True)
-        else:
-            st.info("Sélectionne au moins une SG.")
-
-st.markdown("---")
 
 # ── TENDANCES ──
 section_header("Tendances de marché", "Évolution des flux nets S&R sur la période")
@@ -2663,12 +2581,11 @@ else:
     _nb_collecte = _nb_decollecte = 0
 
 # KPIs
-_k1, _k2, _k3, _k4, _k5 = st.columns(5)
+_k1, _k2, _k3, _k4 = st.columns(4)
 _k1.markdown(_kpi("YTD", fmt_money(_ytd_sg), GREEN if (pd.notna(_ytd_sg) and _ytd_sg >= 0) else RED), unsafe_allow_html=True)
 _k2.markdown(_kpi(f"S&R {_sg_date_sel}", fmt_money(_sg_day_total), GREEN if _sg_day_total >= 0 else RED), unsafe_allow_html=True)
-_k3.markdown(_kpi("Part de marché", fmt_pct(_sg_mkt_share), ACCENT), unsafe_allow_html=True)
-_k4.markdown(_kpi("Fonds en collecte", str(_nb_collecte), GREEN), unsafe_allow_html=True)
-_k5.markdown(_kpi("Fonds en décollecte", str(_nb_decollecte), RED), unsafe_allow_html=True)
+_k3.markdown(_kpi("Fonds en collecte", str(_nb_collecte), GREEN), unsafe_allow_html=True)
+_k4.markdown(_kpi("Fonds en décollecte", str(_nb_decollecte), RED), unsafe_allow_html=True)
 
 st.markdown("<div style='margin-top:20px'></div>", unsafe_allow_html=True)
 
@@ -2693,6 +2610,108 @@ sg_cd = sg_tidy.groupby(["Date_dt", "Bloc"], as_index=False)["SR"].sum()
 if not sg_cd.empty:
     st.altair_chart(line_chart(sg_cd, "Date_dt", "SR", color="Bloc", title=f"{sg_pick}"), use_container_width=True)
 
+
+st.markdown("---")
+
+# ══════════════════════════════════════════════
+# ── DÉTECTION DU SWITCHING INTRA-SG ──
+# ══════════════════════════════════════════════
+section_header(
+    "Réallocations intra-SG (switching)",
+    "Détection des mouvements fond→fond au sein d'une même société de gestion",
+)
+
+if not asfim_sr.empty and "SR" in asfim_sr.columns:
+    _sw_dates = sorted(asfim_sr["Date"].dropna().unique().tolist(), key=mmdd_sort)
+    _sw_date_sel = st.selectbox("Date", _sw_dates, index=len(_sw_dates)-1, key="sw_date_sel")
+    _sw_day = asfim_sr[(asfim_sr["Date"] == _sw_date_sel) & asfim_sr["SR"].notna()].copy()
+
+    if _sw_day.empty:
+        st.info("Aucune donnée pour cette date.")
+    else:
+        _sw_rows = []
+        for _sg, _grp in _sw_day.groupby("SG"):
+            _in   = _grp.loc[_grp["SR"] > 0, "SR"].sum()
+            _out  = _grp.loc[_grp["SR"] < 0, "SR"].sum()
+            _gross = _in + abs(_out)
+            _net   = _in + _out
+            _switch = min(_in, abs(_out))
+            _ratio  = _switch / _gross if _gross > 1e-6 else 0.0
+            _nb_in  = (_grp["SR"] > 0).sum()
+            _nb_out = (_grp["SR"] < 0).sum()
+            if _switch > 0:
+                _sw_rows.append({
+                    "SG": _sg, "Flux entrants": _in, "Flux sortants": abs(_out),
+                    "Montant switché": _switch, "Flux net réel": _net,
+                    "Ratio switching": _ratio, "Fonds ↑": int(_nb_in), "Fonds ↓": int(_nb_out),
+                })
+
+        if not _sw_rows:
+            st.info("Aucun switching détecté pour cette date.")
+        else:
+            _sw_df = pd.DataFrame(_sw_rows).sort_values("Montant switché", ascending=False).reset_index(drop=True)
+            _sw_df.index += 1
+
+            _total_switched = _sw_df["Montant switché"].sum()
+            _kc1, _kc2, _kc3 = st.columns(3)
+            _kc1.markdown(_kpi("Volume total switché", fmt_money(_total_switched), ACCENT), unsafe_allow_html=True)
+            _kc2.markdown(_kpi("SG avec switching", str(len(_sw_df)), SECONDARY), unsafe_allow_html=True)
+            _top = _sw_df.iloc[0]
+            _kc3.markdown(_kpi("1er switcheur", f"{_top['SG'][:20]} · {fmt_money(_top['Montant switché'])}", RED), unsafe_allow_html=True)
+
+            st.markdown("<div style='margin-top:16px'></div>", unsafe_allow_html=True)
+
+            _sw_hdr = ""
+            for _col, _al in [("#","right"),("SG","left"),("Entrants","right"),("Sortants","right"),
+                               ("Switché","right"),("Net réel","right"),("Ratio","right"),("↑","right"),("↓","right")]:
+                _sw_hdr += (f'<th style="text-align:{_al};padding:10px 14px;font-weight:700;font-size:0.64rem;'
+                            f'letter-spacing:0.10em;text-transform:uppercase;white-space:nowrap;'
+                            f'border-bottom:2px solid {ACCENT};background:{SURFACE};color:#9AAABB;'
+                            f'position:sticky;top:0;z-index:1;">{_col}</th>')
+
+            _sw_body = ""
+            for _ri, _rrow in _sw_df.iterrows():
+                _ratio_clr = RED if _rrow["Ratio switching"] > 0.25 else SECONDARY
+                _net_clr   = GREEN if _rrow["Flux net réel"] >= 0 else RED
+                _ratio_bg  = "rgba(192,0,26,.1)" if _rrow["Ratio switching"] > 0.25 else SURFACE
+                _sw_body += (
+                    f'<tr style="background:{BG};" onmouseover="this.style.background=\'#F7FAFD\'" onmouseout="this.style.background=\'{BG}\'">'
+                    f'<td style="text-align:right;padding:8px 14px;font-size:0.75rem;color:{MUTED};border-bottom:1px solid {BORDER};">{_ri}</td>'
+                    f'<td style="text-align:left;padding:8px 14px;font-weight:600;font-size:0.84rem;color:{PRIMARY};border-bottom:1px solid {BORDER};max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{_rrow["SG"]}</td>'
+                    f'<td style="text-align:right;padding:8px 14px;font-size:0.82rem;color:{GREEN};font-weight:600;border-bottom:1px solid {BORDER};">+{fmt_money(_rrow["Flux entrants"])}</td>'
+                    f'<td style="text-align:right;padding:8px 14px;font-size:0.82rem;color:{RED};font-weight:600;border-bottom:1px solid {BORDER};">−{fmt_money(_rrow["Flux sortants"])}</td>'
+                    f'<td style="text-align:right;padding:8px 14px;font-size:0.82rem;color:{ACCENT};font-weight:700;border-bottom:1px solid {BORDER};">{fmt_money(_rrow["Montant switché"])}</td>'
+                    f'<td style="text-align:right;padding:8px 14px;font-size:0.82rem;color:{_net_clr};font-weight:600;border-bottom:1px solid {BORDER};">{fmt_money(_rrow["Flux net réel"])}</td>'
+                    f'<td style="text-align:right;padding:8px 14px;border-bottom:1px solid {BORDER};">'
+                    f'<span style="display:inline-block;padding:2px 8px;border-radius:10px;background:{_ratio_bg};font-size:0.78rem;font-weight:700;color:{_ratio_clr};">{_rrow["Ratio switching"]*100:.0f}%</span></td>'
+                    f'<td style="text-align:right;padding:8px 14px;font-size:0.78rem;color:{GREEN};font-weight:600;border-bottom:1px solid {BORDER};">{_rrow["Fonds ↑"]}</td>'
+                    f'<td style="text-align:right;padding:8px 14px;font-size:0.78rem;color:{RED};font-weight:600;border-bottom:1px solid {BORDER};">{_rrow["Fonds ↓"]}</td>'
+                    f'</tr>'
+                )
+            st.markdown(
+                f'<div style="border:1px solid {BORDER};border-radius:8px;overflow:hidden;box-shadow:0 1px 6px rgba(0,0,0,.06);">'
+                f'<div style="max-height:480px;overflow-y:auto;">'
+                f'<table style="width:100%;border-collapse:collapse;background:{BG};font-family:\'Montserrat\',sans-serif;">'
+                f'<thead><tr>{_sw_hdr}</tr></thead><tbody>{_sw_body}</tbody></table></div></div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<div style="background:{SURFACE};border-left:3px solid {MUTED};border-radius:0 4px 4px 0;'
+                f'padding:10px 16px;margin-top:14px;font-size:0.80rem;color:{SECONDARY};line-height:1.6;">'
+                f'<strong style="color:{PRIMARY};">Comment lire</strong> — '
+                f'Le <em>Montant switché</em> est l\'argent retiré d\'un fonds et réinvesti dans un autre de la même SG. '
+                f'Le <em>Flux net réel</em> représente la vraie collecte/décollecte externe. '
+                f'Un ratio élevé (rouge) indique un mouvement majoritairement interne.</div>',
+                unsafe_allow_html=True,
+            )
+            with st.expander(f"🔍 Détail fonds — {_sw_df.iloc[0]['SG']}"):
+                _sw_detail = _sw_day[_sw_day["SG"] == _sw_df.iloc[0]["SG"]][["OPCVM", "Classification", "SR"]].copy()
+                _sw_detail = _sw_detail.rename(columns={"SR": "S&R"}).sort_values("S&R", ascending=False).reset_index(drop=True)
+                st.markdown(html_table(_sw_detail, ["OPCVM", "Classification", "S&R"], max_h=340), unsafe_allow_html=True)
+else:
+    st.info("Les données ASFIM sont nécessaires pour cette section.")
+
+st.markdown("---")
 
 # ══════════════════════════════════════════════
 # ── RAPPORT PDF ──
